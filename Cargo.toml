@@ -8,3 +8,4 @@ uuid = { version = "1.26.0", features = ["v4", "serde"] }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
 serde_millis = "0.1.1"
+directories = "6.0.0"
