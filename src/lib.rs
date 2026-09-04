@@ -44,11 +44,73 @@ pub struct Playlist {
     pub contents: Vec<PlaylistEntry>
 }
 
+impl Playlist {
+    pub fn new(name: String, description: String) -> Self {
+        Playlist {
+            uuid: Uuid::new_v4(),
+            name,
+            description,
+            contents: Vec::new()
+        }
+    }
+
+    pub fn add_song(&mut self, uuid: Uuid) {
+        self.contents.push(PlaylistEntry::Song(uuid))
+    }
+
+    pub fn insert_song(&mut self, idx: usize, uuid: Uuid) {
+        self.contents.insert(idx, PlaylistEntry::Song(uuid))
+    }
+
+    pub fn add_playlist(&mut self, uuid: Uuid) {
+        self.contents.push(PlaylistEntry::Playlist(uuid))
+    }
+
+    pub fn insert_playlist(&mut self, idx: usize, uuid: Uuid) {
+        self.contents.insert(idx, PlaylistEntry::Playlist(uuid))
+    }
+
+    pub fn remove(&mut self, idx: usize) -> PlaylistEntry {
+        self.contents.remove(idx)
+    }
+
+    pub fn remove_all(&mut self, uuid: Uuid) -> usize {
+        // indices is reversed before being collected so that when it's iterated over to remove from self.contents, the indices of the elements to remove do not change
+        let indices = self.contents.iter().enumerate().filter_map(|(idx, entry)| {
+            if entry.uuid() == &uuid {
+                Some(idx)
+            } else {
+                None
+            }
+        }).rev().collect::<Vec<_>>();
+        indices.iter().for_each(|idx| {self.contents.remove(*idx);});
+        indices.len()
+    }
+
+    pub fn flat_len(&self, library: &MediaLibrary) -> usize {
+        self.contents.iter().map(|entry| {
+            match entry {
+                PlaylistEntry::Playlist(id) => library.playlists[id].flat_len(library),
+                PlaylistEntry::Song(_) => 1
+            }
+        }).sum()
+    }
+}
+
 #[derive(Serialize, Deserialize, Copy, Clone)]
 #[serde(tag = "type", content = "uuid", rename_all = "lowercase")]
 pub enum PlaylistEntry {
     Song(Uuid),
     Playlist(Uuid)
+}
+
+impl PlaylistEntry {
+    pub fn uuid(&self) -> &Uuid {
+        match self {
+            PlaylistEntry::Song(id) => id,
+            PlaylistEntry::Playlist(id) => id
+        }
+    }
 }
 
 fn ok_or_default<'a, T, D>(deserializer: D) -> Result<T, D::Error> where T: Deserialize<'a> + Default, D: Deserializer<'a>
@@ -176,6 +238,27 @@ impl MediaLibrary {
             }
         }
         false
+    }
+
+    pub fn create_playlist(&mut self, name: String, description: String) -> Uuid {
+        let playlist = Playlist::new(name, description);
+        let uuid = playlist.uuid;
+        self.playlists.insert(uuid, playlist);
+        uuid
+    }
+
+    pub fn remove_playlist(&mut self, uuid: Uuid) -> bool{
+        let playlist = self.playlists.remove(&uuid);
+        if let Some(playlist) = playlist {
+            let uuid = playlist.uuid;
+            self.playlists.iter_mut().for_each(|(_, playlist)| {
+                playlist.remove_all(uuid);
+            });
+
+            true
+        } else {
+            false
+        }
     }
 }
 
