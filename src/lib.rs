@@ -180,8 +180,8 @@ impl MediaLibrary {
 
         playlists.into_iter().for_each(|playlist| {self.playlists.insert(playlist.uuid, playlist);});
 
-        for (_, playlist) in &self.playlists {
-            if self.check_contains_loop(&vec![], playlist) {
+        for playlist in self.playlists.values() {
+            if self.check_contains_loop(&[], playlist) {
                 todo!("A playlist loop has been detected, implement error handling for this")
             }
 
@@ -195,11 +195,11 @@ impl MediaLibrary {
         }
     }
 
-    fn check_contains_loop(&self, seen_uuids: &Vec<Uuid>, playlist: &Playlist) -> bool {
+    fn check_contains_loop(&self, seen_uuids: &[Uuid], playlist: &Playlist) -> bool {
         if seen_uuids.contains(&playlist.uuid) {
             true
         } else {
-            let mut seen_uuids = seen_uuids.clone();
+            let mut seen_uuids = Vec::from(seen_uuids);
             seen_uuids.push(playlist.uuid);
             playlist.contents.iter().any(|entry| {
                 if let PlaylistEntry::Playlist(uuid) = entry {
@@ -219,25 +219,15 @@ impl MediaLibrary {
     }
 
     fn contains_missing_playlist(&self, playlist: &Playlist) -> bool {
-        for entry in playlist.contents.iter() {
-            if let PlaylistEntry::Playlist(uuid) = entry {
-                if !self.playlists.contains_key(uuid) {
-                    return true
-                }
-            }
-        }
-        false
+        playlist.contents.iter().any(|entry| {
+            matches!(entry, PlaylistEntry::Playlist(uuid) if !self.playlists.contains_key(uuid))
+        })
     }
 
     fn contains_missing_song(&self, playlist: &Playlist) -> bool {
-        for entry in playlist.contents.iter() {
-            if let PlaylistEntry::Song(uuid) = entry {
-                if !self.songs.contains_key(uuid) {
-                    return true
-                }
-            }
-        }
-        false
+        playlist.contents.iter().any(|entry| {
+            matches!(entry, PlaylistEntry::Song(uuid) if !self.songs.contains_key(uuid))
+        })
     }
 
     pub fn create_playlist(&mut self, name: String, description: String) -> Uuid {
