@@ -8,6 +8,26 @@ use std::time::Duration;
 use uuid::Uuid;
 use serde::{Serialize, Deserialize, Deserializer};
 use serde_json::Value;
+use error_stack::{bail, Report, IntoReport};
+use thiserror::Error;
+
+#[derive(Error, Debug)]
+pub enum LoadSaveError {
+    #[error(transparent)]
+    IOError(#[from] std::io::Error),
+    #[error(transparent)]
+    SerdeError(#[from] serde_json::Error)
+}
+
+#[derive(Error, Debug)]
+pub enum LibraryError {
+    #[error("Unknown playlist with UUID: {0}")]
+    UnknownPlaylist(Uuid),
+    #[error("Unknown song with UUID: {0}")]
+    UnknownSong(Uuid),
+    #[error("Loop detected in playlist with UUID: {0} and name: {1}")]
+    PlaylistLoop(Uuid, String)
+}
 
 #[derive(Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -54,27 +74,19 @@ impl Playlist {
         }
     }
 
-    pub fn add_song(&mut self, uuid: Uuid) {
-        self.contents.push(PlaylistEntry::Song(uuid))
+    fn add_entry(&mut self, entry: PlaylistEntry) {
+        self.contents.push(entry)
     }
 
-    pub fn insert_song(&mut self, idx: usize, uuid: Uuid) {
-        self.contents.insert(idx, PlaylistEntry::Song(uuid))
+    fn insert_entry(&mut self, idx: usize, entry: PlaylistEntry) {
+        self.contents.insert(idx, entry)
     }
 
-    pub fn add_playlist(&mut self, uuid: Uuid) {
-        self.contents.push(PlaylistEntry::Playlist(uuid))
-    }
-
-    pub fn insert_playlist(&mut self, idx: usize, uuid: Uuid) {
-        self.contents.insert(idx, PlaylistEntry::Playlist(uuid))
-    }
-
-    pub fn remove(&mut self, idx: usize) -> PlaylistEntry {
+    fn remove(&mut self, idx: usize) -> PlaylistEntry {
         self.contents.remove(idx)
     }
 
-    pub fn remove_all(&mut self, uuid: Uuid) -> usize {
+    fn remove_all(&mut self, uuid: Uuid) -> usize {
         // indices is reversed before being collected so that when it's iterated over to remove from self.contents, the indices of the elements to remove do not change
         let indices = self.contents.iter().enumerate().filter_map(|(idx, entry)| {
             if entry.uuid() == &uuid {
@@ -132,46 +144,48 @@ impl MediaLibrary {
         }
     }
 
-    pub fn load(config: Config) -> Self {
+    pub fn load(config: Config) -> Result<Self, Report<LoadSaveError>> {
         let mut library = Self::new();
 
         let data_dir = Path::new(&config.data_directory);
         if !data_dir.exists() {
-            fs::create_dir_all(data_dir).expect("Could not create data directory");
+            fs::create_dir_all(data_dir).map_err(|e| LoadSaveError::from(e).into_report().attach("Failed to create data directory"))?;
         }
 
         let playlist_dir = data_dir.join("playlists");
         if !playlist_dir.exists() {
-            fs::create_dir_all(&playlist_dir).expect("Could not create playlist directory");
+            fs::create_dir_all(&playlist_dir).map_err(|e| LoadSaveError::from(e).into_report().attach("Failed to create playlist directory"))?;
         }
 
         let library_file = data_dir.join("library.json");
         if !library_file.exists() {
-            let mut file = File::create_new(&library_file).expect("Could not create library file");
+            let mut file = File::create_new(&library_file).map_err(|e| LoadSaveError::from(e).into_report().attach("Failed to create library file"))?;
             let _temp_vec: Vec<AudioSource> = Vec::new();
-            let default_data = serde_json::to_string(&_temp_vec).expect("Could not serialize empty vec");
+            // This should never fail
+            let default_data = serde_json::to_string(&_temp_vec).expect("Failed to serialize default library");
             let result = file.write_all(default_data.as_bytes());
-            if result.is_err() {
-                fs::remove_file(library_file).expect("Could not remove empty library file");
-                panic!("Could not write default library to file");
+            if let Err(e) = result {
+                fs::remove_file(library_file).map_err(|e| LoadSaveError::from(e).into_report().attach("Failed to remove empty library file"))?;
+                return Err(LoadSaveError::from(e).into_report().attach("Failed to write library to file"))
             }
         }
 
-        library.load_songs(library_file);
-        library.load_playlists(playlist_dir);
+        library.load_songs(library_file)?;
+        library.load_playlists(playlist_dir)?;
 
-        library
+        Ok(library)
     }
 
-    fn load_songs(&mut self, library_file: impl AsRef<Path>) {
+    fn load_songs(&mut self, library_file: impl AsRef<Path>) -> Result<(), Report<LoadSaveError>> {
         // the library file should be accessible, so this `expect` should never fail
-        let library_file = File::open(library_file).expect("Could not open library file");
-        let songs: Vec<AudioSource> = serde_json::from_reader(library_file).expect("Failed to parse library");
+        let library_file = File::open(library_file).map_err(|e| LoadSaveError::from(e).into_report().attach("Failed to open library file"))?;
+        let songs: Vec<AudioSource> = serde_json::from_reader(library_file).map_err(|e| LoadSaveError::from(e).into_report().attach("Failed to parse library"))?;
         songs.into_iter().for_each(|song| {self.songs.insert(song.uuid, song);});
+        Ok(())
     }
 
-    fn load_playlists(&mut self, playlist_dir: impl AsRef<Path>) {
-        let playlists: Vec<_> = playlist_dir.as_ref().read_dir().expect("Could not read playlist directory").filter_map(|playlist_file| {
+    fn load_playlists(&mut self, playlist_dir: impl AsRef<Path>) -> Result<(), Report<LoadSaveError>> {
+        let playlists: Vec<_> = playlist_dir.as_ref().read_dir().map_err(|e| LoadSaveError::from(e).into_report().attach("Could not read playlist directory"))?.filter_map(|playlist_file| {
             let file = playlist_file.ok()?;
             let file = File::open(file.path()).ok()?;
             let playlist: Option<Playlist> = serde_json::from_reader(file).ok();
@@ -193,6 +207,8 @@ impl MediaLibrary {
                 todo!("A playlist references a non-existent song")
             }
         }
+
+        Ok(())
     }
 
     fn check_contains_loop(&self, seen_uuids: &[Uuid], playlist: &Playlist) -> bool {
@@ -249,6 +265,34 @@ impl MediaLibrary {
         } else {
             false
         }
+    }
+
+    pub fn add_to_playlist(&mut self, entry: PlaylistEntry, playlist_uuid: Uuid) -> Result<(), Report<LibraryError>> {
+        if let PlaylistEntry::Playlist(uuid_to_add) = entry {
+            let playlist_to_add = self.playlists.get(&uuid_to_add).ok_or_else(|| Report::new(LibraryError::UnknownPlaylist(uuid_to_add)))?;
+            if self.check_contains_loop(&[playlist_uuid], playlist_to_add) {
+                let playlist = self.playlists.get(&playlist_uuid).ok_or_else(|| Report::new(LibraryError::UnknownPlaylist(playlist_uuid)))?;
+                bail!(Report::new(LibraryError::PlaylistLoop(playlist_uuid, playlist.name.clone())));
+            }
+        }
+
+        let playlist = self.playlists.get_mut(&playlist_uuid).ok_or_else(|| Report::new(LibraryError::UnknownPlaylist(playlist_uuid)))?;
+        playlist.add_entry(entry);
+        Ok(())
+    }
+
+    pub fn insert_into_playlist(&mut self, idx: usize, entry: PlaylistEntry, playlist_uuid: Uuid) -> Result<(), Report<LibraryError>> {
+        if let PlaylistEntry::Playlist(uuid_to_add) = entry {
+            let playlist_to_add = self.playlists.get(&uuid_to_add).ok_or_else(|| Report::new(LibraryError::UnknownPlaylist(uuid_to_add)))?;
+            if self.check_contains_loop(&[playlist_uuid], playlist_to_add) {
+                let playlist = self.playlists.get(&playlist_uuid).ok_or_else(|| Report::new(LibraryError::UnknownPlaylist(playlist_uuid)))?;
+                bail!(Report::new(LibraryError::PlaylistLoop(playlist_uuid, playlist.name.clone())));
+            }
+        }
+
+        let playlist = self.playlists.get_mut(&playlist_uuid).ok_or_else(|| Report::new(LibraryError::UnknownPlaylist(playlist_uuid)))?;
+        playlist.insert_entry(idx, entry);
+        Ok(())
     }
 }
 
