@@ -2,14 +2,15 @@ use std::collections::HashMap;
 use std::fs;
 use std::fs::File;
 use std::io::Write;
-use std::num::NonZeroU32;
 use std::path::Path;
 use std::time::Duration;
 use uuid::Uuid;
-use serde::{Serialize, Deserialize, Deserializer};
-use serde_json::Value;
-use error_stack::{bail, Report, IntoReport};
+use serde::{Serialize, Deserialize};
+use error_stack::{Report, IntoReport};
 use thiserror::Error;
+use lofty::file::{AudioFile, TaggedFileExt};
+use lofty::prelude::ItemKey;
+use lofty::tag::{Accessor};
 
 #[derive(Error, Debug)]
 pub enum LoadSaveError {
@@ -46,9 +47,8 @@ pub struct AudioSource {
     pub album_artist: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub track_number: Option<u32>,
-    #[serde(deserialize_with = "ok_or_default")]
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub track_count: Option<NonZeroU32>,
+    pub track_count: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub year: Option<String>,
     #[serde(with = "serde_millis")]
@@ -125,15 +125,9 @@ impl PlaylistEntry {
     }
 }
 
-fn ok_or_default<'a, T, D>(deserializer: D) -> Result<T, D::Error> where T: Deserialize<'a> + Default, D: Deserializer<'a>
-{
-    let v: Value = Deserialize::deserialize(deserializer)?;
-    Ok(T::deserialize(v).unwrap_or_default())
-}
-
 pub struct MediaLibrary {
-    pub songs: HashMap<Uuid, AudioSource>,
-    pub playlists: HashMap<Uuid, Playlist>
+    songs: HashMap<Uuid, AudioSource>,
+    playlists: HashMap<Uuid, Playlist>
 }
 
 impl MediaLibrary {
@@ -246,6 +240,47 @@ impl MediaLibrary {
         })
     }
 
+    pub fn add_song(&mut self, path: String) -> Uuid {
+        let uuid = Uuid::new_v4();
+        let song = if let Some(song) = read_song_metadata(&path, uuid) {
+            song
+        } else {
+            // We failed to read the metadata, so use the file name as the title
+            let title = Path::new(&path).file_name().and_then(|s| s.to_str()).unwrap_or("").to_string();
+            AudioSource {
+                uuid,
+                path,
+                title,
+                artist: None,
+                album: None,
+                genre: None,
+                album_artist: None,
+                track_number: None,
+                track_count: None,
+                year: None,
+                duration: Default::default(),
+            }
+        };
+
+        self.songs.insert(uuid, song);
+
+        uuid
+    }
+
+    pub fn delete_song(&mut self, uuid: Uuid) -> bool {
+        let audio_source = self.songs.remove(&uuid);
+        if let Some(audio_source) = audio_source {
+            let uuid = audio_source.uuid;
+            self.playlists.iter_mut().for_each(|(_, playlist)| {
+                playlist.remove_all(uuid);
+            });
+
+            true
+        } else {
+            false
+        }
+    }
+
     pub fn create_playlist(&mut self, name: String, description: String) -> Uuid {
         let playlist = Playlist::new(name, description);
         let uuid = playlist.uuid;
@@ -253,7 +288,7 @@ impl MediaLibrary {
         uuid
     }
 
-    pub fn remove_playlist(&mut self, uuid: Uuid) -> bool{
+    pub fn delete_playlist(&mut self, uuid: Uuid) -> bool{
         let playlist = self.playlists.remove(&uuid);
         if let Some(playlist) = playlist {
             let uuid = playlist.uuid;
@@ -272,7 +307,7 @@ impl MediaLibrary {
             let playlist_to_add = self.playlists.get(&uuid_to_add).ok_or_else(|| Report::new(LibraryError::UnknownPlaylist(uuid_to_add)))?;
             if self.check_contains_loop(&[playlist_uuid], playlist_to_add) {
                 let playlist = self.playlists.get(&playlist_uuid).ok_or_else(|| Report::new(LibraryError::UnknownPlaylist(playlist_uuid)))?;
-                bail!(Report::new(LibraryError::PlaylistLoop(playlist_uuid, playlist.name.clone())));
+                return Err(Report::new(LibraryError::PlaylistLoop(playlist_uuid, playlist.name.clone())));
             }
         }
 
@@ -286,7 +321,7 @@ impl MediaLibrary {
             let playlist_to_add = self.playlists.get(&uuid_to_add).ok_or_else(|| Report::new(LibraryError::UnknownPlaylist(uuid_to_add)))?;
             if self.check_contains_loop(&[playlist_uuid], playlist_to_add) {
                 let playlist = self.playlists.get(&playlist_uuid).ok_or_else(|| Report::new(LibraryError::UnknownPlaylist(playlist_uuid)))?;
-                bail!(Report::new(LibraryError::PlaylistLoop(playlist_uuid, playlist.name.clone())));
+                return Err(Report::new(LibraryError::PlaylistLoop(playlist_uuid, playlist.name.clone())));
             }
         }
 
@@ -294,6 +329,43 @@ impl MediaLibrary {
         playlist.insert_entry(idx, entry);
         Ok(())
     }
+
+    pub fn remove_from_playlist(&mut self, idx: usize, playlist_uuid: Uuid) -> Result<PlaylistEntry, Report<LibraryError>> {
+        if let Some(playlist) = self.playlists.get_mut(&playlist_uuid) {
+            let entry = playlist.remove(idx);
+            Ok(entry)
+        } else {
+            Err(Report::new(LibraryError::UnknownPlaylist(playlist_uuid)))
+        }
+    }
+}
+
+fn read_song_metadata(path: impl AsRef<Path> + ToString, uuid: Uuid) -> Option<AudioSource> {
+    // try to guess file type from extension. If that fails, try to guess from file contents
+    let file = if let Ok(file) = lofty::read_from_path(&path) {
+        file
+    } else {
+        lofty::probe::Probe::open(&path).ok()?.guess_file_type().ok()?.read().ok()?
+    };
+    let tag = file.first_tag()?;
+    let title = if let Some(title) = tag.title() {
+        title.to_string()
+    } else {
+        path.as_ref().file_name()?.to_str()?.to_string()
+    };
+    Some(AudioSource {
+        uuid,
+        path: path.to_string(),
+        title,
+        artist: tag.artist().map(String::from),
+        album: tag.album().map(String::from),
+        genre: tag.genre().map(String::from),
+        album_artist: tag.get_string(ItemKey::AlbumArtist).map(String::from),
+        track_number: tag.track(),
+        track_count: tag.track_total(),
+        year: tag.date().map(|d| d.year.to_string()),
+        duration: file.properties().duration(),
+    })
 }
 
 #[derive(Serialize, Deserialize, Default)]
