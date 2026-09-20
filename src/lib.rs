@@ -189,15 +189,17 @@ impl MediaLibrary {
         playlists.into_iter().for_each(|playlist| {self.playlists.insert(playlist.uuid, playlist);});
 
         for playlist in self.playlists.values() {
-            if self.check_contains_loop(&[], playlist) {
+            if let Some(uuid_with_loop) = self.find_playlist_loop(&[], playlist) {
                 todo!("A playlist loop has been detected, implement error handling for this")
             }
 
-            if self.contains_missing_playlist(playlist) {
+            let missing_playlists = self.find_missing_playlists(playlist);
+            if !missing_playlists.is_empty() {
                 todo!("A playlist references a non-existent playlist")
             }
 
-            if self.contains_missing_song(playlist) {
+            let missing_songs = self.find_missing_songs(playlist);
+            if !missing_songs.is_empty() {
                 todo!("A playlist references a non-existent song")
             }
         }
@@ -205,39 +207,47 @@ impl MediaLibrary {
         Ok(())
     }
 
-    fn check_contains_loop(&self, seen_uuids: &[Uuid], playlist: &Playlist) -> bool {
+    fn find_playlist_loop(&self, seen_uuids: &[Uuid], playlist: &Playlist) -> Option<Uuid> {
         if seen_uuids.contains(&playlist.uuid) {
-            true
+            Some(playlist.uuid)
         } else {
             let mut seen_uuids = Vec::from(seen_uuids);
             seen_uuids.push(playlist.uuid);
-            playlist.contents.iter().any(|entry| {
+            playlist.contents.iter().find_map(|entry| {
                 if let PlaylistEntry::Playlist(uuid) = entry {
                     let playlist = self.playlists.get(uuid);
                     if let Some(playlist) = playlist {
-                        self.check_contains_loop(&seen_uuids, playlist)
+                        self.find_playlist_loop(&seen_uuids, playlist)
                     } else {
-                        // playlist references a non-existent playlist, this will be handled after loops are checked
-                        false
+                        // playlist references a non-existent playlist, this is checked for in a different function
+                        None
                     }
                 } else {
                     // Don't need to check a playlist against a song
-                    false
+                    None
                 }
             })
         }
     }
 
-    fn contains_missing_playlist(&self, playlist: &Playlist) -> bool {
-        playlist.contents.iter().any(|entry| {
-            matches!(entry, PlaylistEntry::Playlist(uuid) if !self.playlists.contains_key(uuid))
-        })
+    fn find_missing_playlists<'a>(&self, playlist: &'a Playlist) -> Vec<&'a Uuid> {
+        playlist.contents.iter().filter_map(|entry| {
+            if let PlaylistEntry::Playlist(uuid) = entry && !self.playlists.contains_key(uuid) {
+                Some(uuid)
+            } else {
+                None
+            }
+        }).collect()
     }
 
-    fn contains_missing_song(&self, playlist: &Playlist) -> bool {
-        playlist.contents.iter().any(|entry| {
-            matches!(entry, PlaylistEntry::Song(uuid) if !self.songs.contains_key(uuid))
-        })
+    fn find_missing_songs<'a>(&self, playlist: &'a Playlist) -> Vec<&'a Uuid> {
+        playlist.contents.iter().filter_map(|entry| {
+            if let PlaylistEntry::Song(uuid) = entry && !self.songs.contains_key(uuid) {
+                Some(uuid)
+            } else {
+                None
+            }
+        }).collect()
     }
 
     pub fn add_song(&mut self, path: String) -> Uuid {
@@ -305,7 +315,7 @@ impl MediaLibrary {
     pub fn add_to_playlist(&mut self, entry: PlaylistEntry, playlist_uuid: Uuid) -> Result<(), Report<LibraryError>> {
         if let PlaylistEntry::Playlist(uuid_to_add) = entry {
             let playlist_to_add = self.playlists.get(&uuid_to_add).ok_or_else(|| Report::new(LibraryError::UnknownPlaylist(uuid_to_add)))?;
-            if self.check_contains_loop(&[playlist_uuid], playlist_to_add) {
+            if self.find_playlist_loop(&[playlist_uuid], playlist_to_add).is_some() {
                 let playlist = self.playlists.get(&playlist_uuid).ok_or_else(|| Report::new(LibraryError::UnknownPlaylist(playlist_uuid)))?;
                 return Err(Report::new(LibraryError::PlaylistLoop(playlist_uuid, playlist.name.clone())));
             }
@@ -319,7 +329,7 @@ impl MediaLibrary {
     pub fn insert_into_playlist(&mut self, idx: usize, entry: PlaylistEntry, playlist_uuid: Uuid) -> Result<(), Report<LibraryError>> {
         if let PlaylistEntry::Playlist(uuid_to_add) = entry {
             let playlist_to_add = self.playlists.get(&uuid_to_add).ok_or_else(|| Report::new(LibraryError::UnknownPlaylist(uuid_to_add)))?;
-            if self.check_contains_loop(&[playlist_uuid], playlist_to_add) {
+            if self.find_playlist_loop(&[playlist_uuid], playlist_to_add).is_some() {
                 let playlist = self.playlists.get(&playlist_uuid).ok_or_else(|| Report::new(LibraryError::UnknownPlaylist(playlist_uuid)))?;
                 return Err(Report::new(LibraryError::PlaylistLoop(playlist_uuid, playlist.name.clone())));
             }

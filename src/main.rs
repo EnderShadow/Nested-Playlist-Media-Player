@@ -25,4 +25,5 @@ fn main() {
     }
 
     let library = MediaLibrary::load(config);
+    library.unwrap();
 }
