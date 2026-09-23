@@ -61,7 +61,9 @@ pub struct Playlist {
     pub name: String,
     pub description: String,
     #[serde(alias="sources")]
-    pub contents: Vec<PlaylistEntry>
+    pub contents: Vec<PlaylistEntry>,
+    #[serde(skip)]
+    dirty: bool
 }
 
 impl Playlist {
@@ -70,19 +72,23 @@ impl Playlist {
             uuid: Uuid::new_v4(),
             name,
             description,
-            contents: Vec::new()
+            contents: Vec::new(),
+            dirty: true
         }
     }
 
     fn add_entry(&mut self, entry: PlaylistEntry) {
-        self.contents.push(entry)
+        self.contents.push(entry);
+        self.dirty = true;
     }
 
     fn insert_entry(&mut self, idx: usize, entry: PlaylistEntry) {
-        self.contents.insert(idx, entry)
+        self.contents.insert(idx, entry);
+        self.dirty = true;
     }
 
     fn remove(&mut self, idx: usize) -> PlaylistEntry {
+        self.dirty = true;
         self.contents.remove(idx)
     }
 
@@ -96,7 +102,18 @@ impl Playlist {
             }
         }).rev().collect::<Vec<_>>();
         indices.iter().for_each(|idx| {self.contents.remove(*idx);});
+        if !indices.is_empty() {
+            self.dirty = true;
+        }
         indices.len()
+    }
+
+    fn mark_dirty(&mut self) {
+        self.dirty = true;
+    }
+
+    fn mark_clean(&mut self) {
+        self.dirty = false;
     }
 
     pub fn flat_len(&self, library: &MediaLibrary) -> usize {
@@ -127,15 +144,52 @@ impl PlaylistEntry {
 
 pub struct MediaLibrary {
     songs: HashMap<Uuid, AudioSource>,
-    playlists: HashMap<Uuid, Playlist>
+    playlists: HashMap<Uuid, Playlist>,
+    dirty: bool
 }
 
 impl MediaLibrary {
     fn new() -> Self {
         MediaLibrary {
             songs: HashMap::new(),
-            playlists: HashMap::new()
+            playlists: HashMap::new(),
+            dirty: false
         }
+    }
+
+    pub fn save(&mut self, config: Config) -> Result<(), Report<LoadSaveError>> {
+        let data_dir = Path::new(&config.data_directory);
+        if !data_dir.exists() {
+            fs::create_dir_all(data_dir).map_err(|e| LoadSaveError::from(e).into_report().attach("Failed to create data directory"))?;
+        }
+
+        let playlist_dir = data_dir.join("playlists");
+        if !playlist_dir.exists() {
+            fs::create_dir_all(&playlist_dir).map_err(|e| LoadSaveError::from(e).into_report().attach("Failed to create playlist directory"))?;
+        }
+
+        if self.dirty {
+            let library_file = data_dir.join("library.json");
+            let new_library_file = library_file.with_added_extension("new");
+            let mut file = File::create(&new_library_file).map_err(|e| LoadSaveError::from(e).into_report().attach("Failed to create library file"))?;
+            // This should never fail
+            let data = serde_json::to_string(&self.songs).expect("Failed to serialize library");
+            file.write_all(data.as_bytes()).map_err(|e| LoadSaveError::from(e).into_report().attach("Failed to write library to file"))?;
+            fs::rename(new_library_file, library_file).map_err(|e| LoadSaveError::from(e).into_report().attach("Failed to overwrite old library file with new library file"))?;
+            self.dirty = false;
+        }
+
+        for playlist in self.playlists.values_mut().filter(|p| p.dirty) {
+            let playlist_file = playlist_dir.join(&playlist.name).with_added_extension("json");
+            let temp_file = playlist_file.with_added_extension("new");
+            let mut file = File::create(&temp_file).map_err(|e| LoadSaveError::from(e).into_report().attach("Failed to create playlist file"))?;
+            let data = serde_json::to_string(&playlist).map_err(|e| LoadSaveError::from(e).into_report().attach("Failed to serialize playlist file"))?;
+            file.write_all(data.as_bytes()).map_err(|e| LoadSaveError::from(e).into_report().attach("Failed to write playlist file to file"))?;
+            fs::rename(temp_file, playlist_file).map_err(|e| LoadSaveError::from(e).into_report().attach("Failed to overwrite playlist file with new playlist file"))?;
+            playlist.mark_clean();
+        }
+
+        Ok(())
     }
 
     pub fn load(config: Config) -> Result<Self, Report<LoadSaveError>> {
@@ -273,6 +327,7 @@ impl MediaLibrary {
         };
 
         self.songs.insert(uuid, song);
+        self.dirty = true;
 
         uuid
     }
@@ -284,6 +339,7 @@ impl MediaLibrary {
             self.playlists.iter_mut().for_each(|(_, playlist)| {
                 playlist.remove_all(uuid);
             });
+            self.dirty = true;
 
             true
         } else {
@@ -304,6 +360,7 @@ impl MediaLibrary {
             let uuid = playlist.uuid;
             self.playlists.iter_mut().for_each(|(_, playlist)| {
                 playlist.remove_all(uuid);
+                playlist.mark_dirty();
             });
 
             true
@@ -323,6 +380,7 @@ impl MediaLibrary {
 
         let playlist = self.playlists.get_mut(&playlist_uuid).ok_or_else(|| Report::new(LibraryError::UnknownPlaylist(playlist_uuid)))?;
         playlist.add_entry(entry);
+        playlist.mark_dirty();
         Ok(())
     }
 
@@ -337,12 +395,14 @@ impl MediaLibrary {
 
         let playlist = self.playlists.get_mut(&playlist_uuid).ok_or_else(|| Report::new(LibraryError::UnknownPlaylist(playlist_uuid)))?;
         playlist.insert_entry(idx, entry);
+        playlist.mark_dirty();
         Ok(())
     }
 
     pub fn remove_from_playlist(&mut self, idx: usize, playlist_uuid: Uuid) -> Result<PlaylistEntry, Report<LibraryError>> {
         if let Some(playlist) = self.playlists.get_mut(&playlist_uuid) {
             let entry = playlist.remove(idx);
+            playlist.mark_dirty();
             Ok(entry)
         } else {
             Err(Report::new(LibraryError::UnknownPlaylist(playlist_uuid)))
