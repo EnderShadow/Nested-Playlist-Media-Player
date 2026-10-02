@@ -1,5 +1,8 @@
 use std::fs::File;
+use std::sync::{OnceLock, RwLock};
 use media_player::{Config, MediaLibrary};
+
+pub static MEDIA_LIBRARY: OnceLock<RwLock<MediaLibrary>> = OnceLock::new();
 
 fn main() {
     // If we can't find the user's base directories, we can't load the config.
@@ -25,5 +28,13 @@ fn main() {
     }
 
     let library = MediaLibrary::load(config);
-    library.unwrap();
+    let library = match library {
+        Ok(library) => library,
+        Err(error) => {
+            todo!("Handle errors when loading media library: {}", error);
+        }
+    };
+
+    // MEDIA_LIBRARY is guaranteed to be uninitialized here, so this will never fail.
+    MEDIA_LIBRARY.set(RwLock::new(library)).ok().unwrap();
 }

@@ -30,7 +30,7 @@ pub enum LibraryError {
     PlaylistLoop(Uuid, String)
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Clone, Eq, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct AudioSource {
     pub uuid: Uuid,
@@ -53,6 +53,12 @@ pub struct AudioSource {
     pub year: Option<String>,
     #[serde(with = "serde_millis")]
     pub duration: Duration,
+}
+
+pub struct PlaylistInfo {
+    pub uuid: Uuid,
+    pub name: String,
+    pub description: String
 }
 
 #[derive(Serialize, Deserialize)]
@@ -406,6 +412,44 @@ impl MediaLibrary {
             Ok(entry)
         } else {
             Err(Report::new(LibraryError::UnknownPlaylist(playlist_uuid)))
+        }
+    }
+
+    pub fn get_songs(&self) -> Vec<Uuid> {
+        self.songs.keys().cloned().collect()
+    }
+
+    pub fn get_song_info(&self, uuid: &Uuid) -> Option<AudioSource>{
+        self.songs.get(uuid).cloned()
+    }
+
+    pub fn get_playlists(&self) -> Vec<Uuid> {
+        self.playlists.keys().cloned().collect()
+    }
+
+    pub fn get_playlist_info(&self, uuid: &Uuid) -> Option<PlaylistInfo> {
+        let playlist = self.playlists.get(uuid)?;
+        Some(PlaylistInfo {
+            uuid: playlist.uuid,
+            name: playlist.name.clone(),
+            description: playlist.description.clone()
+        })
+    }
+
+    pub fn get_playlist_contents(&self, uuid: Uuid) -> Option<Vec<PlaylistEntry>> {
+        let playlist = self.playlists.get(&uuid)?;
+        Some(playlist.contents.clone())
+    }
+
+    pub fn refresh_song_metadata(&mut self, uuid: Uuid) -> Result<bool, Report<LibraryError>> {
+        let song = self.songs.get(&uuid).ok_or_else(|| Report::new(LibraryError::UnknownSong(uuid)))?;
+        let updated_song = read_song_metadata(&song.path, uuid);
+        if let Some(updated_song) = updated_song && song != &updated_song{
+            self.songs.insert(uuid, updated_song);
+            self.dirty = true;
+            Ok(true)
+        } else {
+            Ok(false)
         }
     }
 }
