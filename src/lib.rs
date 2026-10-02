@@ -8,9 +8,7 @@ use uuid::Uuid;
 use serde::{Serialize, Deserialize};
 use error_stack::{Report, IntoReport};
 use thiserror::Error;
-use lofty::file::{AudioFile, TaggedFileExt};
-use lofty::prelude::ItemKey;
-use lofty::tag::{Accessor};
+use ratag::TagRetrieve;
 
 #[derive(Error, Debug)]
 pub enum LoadSaveError {
@@ -163,7 +161,7 @@ impl MediaLibrary {
         }
     }
 
-    pub fn save(&mut self, config: Config) -> Result<(), Report<LoadSaveError>> {
+    pub fn save(&mut self, config: &Config) -> Result<(), Report<LoadSaveError>> {
         let data_dir = Path::new(&config.data_directory);
         if !data_dir.exists() {
             fs::create_dir_all(data_dir).map_err(|e| LoadSaveError::from(e).into_report().attach("Failed to create data directory"))?;
@@ -179,7 +177,7 @@ impl MediaLibrary {
             let new_library_file = library_file.with_added_extension("new");
             let mut file = File::create(&new_library_file).map_err(|e| LoadSaveError::from(e).into_report().attach("Failed to create library file"))?;
             // This should never fail
-            let data = serde_json::to_string(&self.songs).expect("Failed to serialize library");
+            let data = serde_json::to_string(&self.songs.values().collect::<Vec<_>>()).expect("Failed to serialize library");
             file.write_all(data.as_bytes()).map_err(|e| LoadSaveError::from(e).into_report().attach("Failed to write library to file"))?;
             fs::rename(new_library_file, library_file).map_err(|e| LoadSaveError::from(e).into_report().attach("Failed to overwrite old library file with new library file"))?;
             self.dirty = false;
@@ -198,7 +196,7 @@ impl MediaLibrary {
         Ok(())
     }
 
-    pub fn load(config: Config) -> Result<Self, Report<LoadSaveError>> {
+    pub fn load(config: &Config) -> Result<Self, Report<LoadSaveError>> {
         let mut library = Self::new();
 
         let data_dir = Path::new(&config.data_directory);
@@ -234,7 +232,16 @@ impl MediaLibrary {
         // the library file should be accessible, so this `expect` should never fail
         let library_file = File::open(library_file).map_err(|e| LoadSaveError::from(e).into_report().attach("Failed to open library file"))?;
         let songs: Vec<AudioSource> = serde_json::from_reader(library_file).map_err(|e| LoadSaveError::from(e).into_report().attach("Failed to parse library"))?;
-        songs.into_iter().for_each(|song| {self.songs.insert(song.uuid, song);});
+        for song in songs {
+            let path = song.path.clone();
+            // fallback to the metadata read from the library file if we cannot read the metadata from the file (eg. song doesn't exist on disk or is not of a compatible file type with the metadata parsing library)
+            let song = read_song_metadata(&path, song.uuid).unwrap_or_else(|| {
+                println!("Failed to read metadata for file {}: Using metadata stored in library", path);
+                song
+            });
+            self.songs.insert(song.uuid, song);
+        }
+        self.dirty = true;
         Ok(())
     }
 
@@ -455,14 +462,8 @@ impl MediaLibrary {
 }
 
 fn read_song_metadata(path: impl AsRef<Path> + ToString, uuid: Uuid) -> Option<AudioSource> {
-    // try to guess file type from extension. If that fails, try to guess from file contents
-    let file = if let Ok(file) = lofty::read_from_path(&path) {
-        file
-    } else {
-        lofty::probe::Probe::open(&path).ok()?.guess_file_type().ok()?.read().ok()?
-    };
-    let tag = file.first_tag()?;
-    let title = if let Some(title) = tag.title() {
+    let tag = ratag::tag::Basic::from_file(&path).ok()?;
+    let title = if let Some(title) = &tag.title {
         title.to_string()
     } else {
         path.as_ref().file_name()?.to_str()?.to_string()
@@ -471,14 +472,14 @@ fn read_song_metadata(path: impl AsRef<Path> + ToString, uuid: Uuid) -> Option<A
         uuid,
         path: path.to_string(),
         title,
-        artist: tag.artist().map(String::from),
-        album: tag.album().map(String::from),
-        genre: tag.genre().map(String::from),
-        album_artist: tag.get_string(ItemKey::AlbumArtist).map(String::from),
-        track_number: tag.track(),
-        track_count: tag.track_total(),
-        year: tag.date().map(|d| d.year.to_string()),
-        duration: file.properties().duration(),
+        artist: tag.artists.first().cloned(),
+        album: tag.album.clone(),
+        genre: tag.genres.first().cloned(),
+        album_artist: tag.album_artist.clone(),
+        track_number: tag.track,
+        track_count: tag.get_track_count(),
+        year: tag.year.map(|x| format!("{}", x)),
+        duration: tag.length.unwrap_or(Duration::ZERO),
     })
 }
 
