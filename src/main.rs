@@ -1,6 +1,8 @@
+mod gui;
+
+use media_player::{Config, MediaLibrary};
 use std::fs::File;
 use std::sync::{OnceLock, RwLock};
-use media_player::{Config, MediaLibrary};
 
 pub static MEDIA_LIBRARY: OnceLock<RwLock<MediaLibrary>> = OnceLock::new();
 
@@ -24,7 +26,10 @@ fn main() {
         let mut data_dir = base_dirs.data_dir().to_path_buf();
         data_dir.push("Nested Playlist Media Player");
         // I'm not sure when this would ever fail in practice even though it theoretically could.'
-        config.data_directory = data_dir.to_str().expect("Could not parse data directory as a string").to_owned();
+        config.data_directory = data_dir
+            .to_str()
+            .expect("Could not parse data directory as a string")
+            .to_owned();
     }
 
     let library = MediaLibrary::load(&config);
@@ -39,4 +44,7 @@ fn main() {
 
     // MEDIA_LIBRARY is guaranteed to be uninitialized here, so this will never fail.
     MEDIA_LIBRARY.set(RwLock::new(library)).ok().unwrap();
+
+    let x = gui::run_gui();
+    x.unwrap();
 }
