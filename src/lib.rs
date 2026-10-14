@@ -99,19 +99,7 @@ impl Playlist {
 
     fn remove_all(&mut self, uuid: Uuid) -> usize {
         // indices is reversed before being collected so that when it's iterated over to remove from self.contents, the indices of the elements to remove do not change
-        let indices = self
-            .contents
-            .iter()
-            .enumerate()
-            .filter_map(|(idx, entry)| {
-                if entry.uuid() == &uuid {
-                    Some(idx)
-                } else {
-                    None
-                }
-            })
-            .rev()
-            .collect::<Vec<_>>();
+        let indices = self.contents.iter().enumerate().filter_map(|(idx, entry)| if entry.uuid() == &uuid { Some(idx) } else { None }).rev().collect::<Vec<_>>();
         indices.iter().for_each(|idx| {
             self.contents.remove(*idx);
         });
@@ -135,8 +123,7 @@ impl Playlist {
             .map(|entry| match entry {
                 PlaylistEntry::Playlist(id) => library.playlists[id].flat_len(library),
                 PlaylistEntry::Song(_) => 1,
-            })
-            .sum()
+            }).sum()
     }
 }
 
@@ -174,71 +161,32 @@ impl MediaLibrary {
     pub fn save(&mut self, config: &Config) -> Result<(), Report<LoadSaveError>> {
         let data_dir = Path::new(&config.data_directory);
         if !data_dir.exists() {
-            fs::create_dir_all(data_dir).map_err(|e| {
-                LoadSaveError::from(e)
-                    .into_report()
-                    .attach("Failed to create data directory")
-            })?;
+            fs::create_dir_all(data_dir).map_err(|e| LoadSaveError::from(e).into_report().attach("Failed to create data directory"))?;
         }
 
         let playlist_dir = data_dir.join("playlists");
         if !playlist_dir.exists() {
-            fs::create_dir_all(&playlist_dir).map_err(|e| {
-                LoadSaveError::from(e)
-                    .into_report()
-                    .attach("Failed to create playlist directory")
-            })?;
+            fs::create_dir_all(&playlist_dir).map_err(|e| LoadSaveError::from(e).into_report().attach("Failed to create playlist directory"))?;
         }
 
         if self.dirty {
             let library_file = data_dir.join("library.json");
             let new_library_file = library_file.with_added_extension("new");
-            let mut file = File::create(&new_library_file).map_err(|e| {
-                LoadSaveError::from(e)
-                    .into_report()
-                    .attach("Failed to create library file")
-            })?;
+            let mut file = File::create(&new_library_file).map_err(|e| LoadSaveError::from(e).into_report().attach("Failed to create library file"))?;
             // This should never fail
-            let data = serde_json::to_string(&self.songs.values().collect::<Vec<_>>())
-                .expect("Failed to serialize library");
-            file.write_all(data.as_bytes()).map_err(|e| {
-                LoadSaveError::from(e)
-                    .into_report()
-                    .attach("Failed to write library to file")
-            })?;
-            fs::rename(new_library_file, library_file).map_err(|e| {
-                LoadSaveError::from(e)
-                    .into_report()
-                    .attach("Failed to overwrite old library file with new library file")
-            })?;
+            let data = serde_json::to_string(&self.songs.values().collect::<Vec<_>>()).expect("Failed to serialize library");
+            file.write_all(data.as_bytes()).map_err(|e| LoadSaveError::from(e).into_report().attach("Failed to write library to file"))?;
+            fs::rename(new_library_file, library_file).map_err(|e| LoadSaveError::from(e).into_report().attach("Failed to overwrite old library file with new library file"))?;
             self.dirty = false;
         }
 
         for playlist in self.playlists.values_mut().filter(|p| p.dirty) {
-            let playlist_file = playlist_dir
-                .join(&playlist.name)
-                .with_added_extension("json");
+            let playlist_file = playlist_dir.join(&playlist.name).with_added_extension("json");
             let temp_file = playlist_file.with_added_extension("new");
-            let mut file = File::create(&temp_file).map_err(|e| {
-                LoadSaveError::from(e)
-                    .into_report()
-                    .attach("Failed to create playlist file")
-            })?;
-            let data = serde_json::to_string(&playlist).map_err(|e| {
-                LoadSaveError::from(e)
-                    .into_report()
-                    .attach("Failed to serialize playlist file")
-            })?;
-            file.write_all(data.as_bytes()).map_err(|e| {
-                LoadSaveError::from(e)
-                    .into_report()
-                    .attach("Failed to write playlist file to file")
-            })?;
-            fs::rename(temp_file, playlist_file).map_err(|e| {
-                LoadSaveError::from(e)
-                    .into_report()
-                    .attach("Failed to overwrite playlist file with new playlist file")
-            })?;
+            let mut file = File::create(&temp_file).map_err(|e| LoadSaveError::from(e).into_report().attach("Failed to create playlist file"))?;
+            let data = serde_json::to_string(&playlist).map_err(|e| LoadSaveError::from(e).into_report().attach("Failed to serialize playlist file"))?;
+            file.write_all(data.as_bytes()).map_err(|e| LoadSaveError::from(e).into_report().attach("Failed to write playlist file to file"))?;
+            fs::rename(temp_file, playlist_file).map_err(|e| LoadSaveError::from(e).into_report().attach("Failed to overwrite playlist file with new playlist file"))?;
             playlist.mark_clean();
         }
 
@@ -250,43 +198,24 @@ impl MediaLibrary {
 
         let data_dir = Path::new(&config.data_directory);
         if !data_dir.exists() {
-            fs::create_dir_all(data_dir).map_err(|e| {
-                LoadSaveError::from(e)
-                    .into_report()
-                    .attach("Failed to create data directory")
-            })?;
+            fs::create_dir_all(data_dir).map_err(|e| LoadSaveError::from(e).into_report().attach("Failed to create data directory"))?;
         }
 
         let playlist_dir = data_dir.join("playlists");
         if !playlist_dir.exists() {
-            fs::create_dir_all(&playlist_dir).map_err(|e| {
-                LoadSaveError::from(e)
-                    .into_report()
-                    .attach("Failed to create playlist directory")
-            })?;
+            fs::create_dir_all(&playlist_dir).map_err(|e| LoadSaveError::from(e).into_report().attach("Failed to create playlist directory"))?;
         }
 
         let library_file = data_dir.join("library.json");
         if !library_file.exists() {
-            let mut file = File::create_new(&library_file).map_err(|e| {
-                LoadSaveError::from(e)
-                    .into_report()
-                    .attach("Failed to create library file")
-            })?;
+            let mut file = File::create_new(&library_file).map_err(|e| LoadSaveError::from(e).into_report().attach("Failed to create library file"))?;
             let _temp_vec: Vec<AudioSource> = Vec::new();
             // This should never fail
-            let default_data =
-                serde_json::to_string(&_temp_vec).expect("Failed to serialize default library");
+            let default_data = serde_json::to_string(&_temp_vec).expect("Failed to serialize default library");
             let result = file.write_all(default_data.as_bytes());
             if let Err(e) = result {
-                fs::remove_file(library_file).map_err(|e| {
-                    LoadSaveError::from(e)
-                        .into_report()
-                        .attach("Failed to remove empty library file")
-                })?;
-                return Err(LoadSaveError::from(e)
-                    .into_report()
-                    .attach("Failed to write library to file"));
+                fs::remove_file(library_file).map_err(|e| LoadSaveError::from(e).into_report().attach("Failed to remove empty library file"))?;
+                return Err(LoadSaveError::from(e).into_report().attach("Failed to write library to file"));
             }
         }
 
@@ -298,24 +227,13 @@ impl MediaLibrary {
 
     fn load_songs(&mut self, library_file: impl AsRef<Path>) -> Result<(), Report<LoadSaveError>> {
         // the library file should be accessible, so this `expect` should never fail
-        let library_file = File::open(library_file).map_err(|e| {
-            LoadSaveError::from(e)
-                .into_report()
-                .attach("Failed to open library file")
-        })?;
-        let songs: Vec<AudioSource> = serde_json::from_reader(library_file).map_err(|e| {
-            LoadSaveError::from(e)
-                .into_report()
-                .attach("Failed to parse library")
-        })?;
+        let library_file = File::open(library_file).map_err(|e| LoadSaveError::from(e).into_report().attach("Failed to open library file"))?;
+        let songs: Vec<AudioSource> = serde_json::from_reader(library_file).map_err(|e| LoadSaveError::from(e).into_report().attach("Failed to parse library"))?;
         for song in songs {
             let path = song.path.clone();
             // fallback to the metadata read from the library file if we cannot read the metadata from the file (eg. song doesn't exist on disk or is not of a compatible file type with the metadata parsing library)
             let song = read_song_metadata(&path, song.uuid).unwrap_or_else(|| {
-                println!(
-                    "Failed to read metadata for file {}: Using metadata stored in library",
-                    path
-                );
+                println!("Failed to read metadata for file {}: Using metadata stored in library", path);
                 song
             });
             self.songs.insert(song.uuid, song);
@@ -324,25 +242,13 @@ impl MediaLibrary {
         Ok(())
     }
 
-    fn load_playlists(
-        &mut self,
-        playlist_dir: impl AsRef<Path>,
-    ) -> Result<(), Report<LoadSaveError>> {
-        let playlists: Vec<_> = playlist_dir
-            .as_ref()
-            .read_dir()
-            .map_err(|e| {
-                LoadSaveError::from(e)
-                    .into_report()
-                    .attach("Could not read playlist directory")
-            })?
-            .filter_map(|playlist_file| {
+    fn load_playlists(&mut self, playlist_dir: impl AsRef<Path>) -> Result<(), Report<LoadSaveError>> {
+        let playlists: Vec<_> = playlist_dir.as_ref().read_dir().map_err(|e| LoadSaveError::from(e).into_report().attach("Could not read playlist directory"))?.filter_map(|playlist_file| {
                 let file = playlist_file.ok()?;
                 let file = File::open(file.path()).ok()?;
                 let playlist: Option<Playlist> = serde_json::from_reader(file).ok();
                 playlist
-            })
-            .collect();
+            }).collect();
 
         playlists.into_iter().for_each(|playlist| {
             self.playlists.insert(playlist.uuid, playlist);
@@ -391,35 +297,23 @@ impl MediaLibrary {
     }
 
     fn find_missing_playlists<'a>(&self, playlist: &'a Playlist) -> Vec<&'a Uuid> {
-        playlist
-            .contents
-            .iter()
-            .filter_map(|entry| {
-                if let PlaylistEntry::Playlist(uuid) = entry
-                    && !self.playlists.contains_key(uuid)
-                {
+        playlist.contents.iter().filter_map(|entry| {
+                if let PlaylistEntry::Playlist(uuid) = entry && !self.playlists.contains_key(uuid) {
                     Some(uuid)
                 } else {
                     None
                 }
-            })
-            .collect()
+            }).collect()
     }
 
     fn find_missing_songs<'a>(&self, playlist: &'a Playlist) -> Vec<&'a Uuid> {
-        playlist
-            .contents
-            .iter()
-            .filter_map(|entry| {
-                if let PlaylistEntry::Song(uuid) = entry
-                    && !self.songs.contains_key(uuid)
-                {
+        playlist.contents.iter().filter_map(|entry| {
+                if let PlaylistEntry::Song(uuid) = entry && !self.songs.contains_key(uuid) {
                     Some(uuid)
                 } else {
                     None
                 }
-            })
-            .collect()
+            }).collect()
     }
 
     pub fn add_song(&mut self, path: String) -> Uuid {
@@ -428,11 +322,7 @@ impl MediaLibrary {
             song
         } else {
             // We failed to read the metadata, so use the file name as the title
-            let title = Path::new(&path)
-                .file_name()
-                .and_then(|s| s.to_str())
-                .unwrap_or("")
-                .to_string();
+            let title = Path::new(&path).file_name().and_then(|s| s.to_str()).unwrap_or("").to_string();
             AudioSource {
                 uuid,
                 path,
@@ -491,80 +381,37 @@ impl MediaLibrary {
         }
     }
 
-    pub fn add_to_playlist(
-        &mut self,
-        entry: PlaylistEntry,
-        playlist_uuid: Uuid,
-    ) -> Result<(), Report<LibraryError>> {
+    pub fn add_to_playlist(&mut self, entry: PlaylistEntry, playlist_uuid: Uuid) -> Result<(), Report<LibraryError>> {
         if let PlaylistEntry::Playlist(uuid_to_add) = entry {
-            let playlist_to_add = self
-                .playlists
-                .get(&uuid_to_add)
-                .ok_or_else(|| Report::new(LibraryError::UnknownPlaylist(uuid_to_add)))?;
-            if self
-                .find_playlist_loop(&[playlist_uuid], playlist_to_add)
-                .is_some()
-            {
-                let playlist = self
-                    .playlists
-                    .get(&playlist_uuid)
-                    .ok_or_else(|| Report::new(LibraryError::UnknownPlaylist(playlist_uuid)))?;
-                return Err(Report::new(LibraryError::PlaylistLoop(
-                    playlist_uuid,
-                    playlist.name.clone(),
-                )));
+            let playlist_to_add = self.playlists.get(&uuid_to_add).ok_or_else(|| Report::new(LibraryError::UnknownPlaylist(uuid_to_add)))?;
+            if self.find_playlist_loop(&[playlist_uuid], playlist_to_add).is_some() {
+                let playlist = self.playlists.get(&playlist_uuid).ok_or_else(|| Report::new(LibraryError::UnknownPlaylist(playlist_uuid)))?;
+                return Err(Report::new(LibraryError::PlaylistLoop(playlist_uuid, playlist.name.clone())));
             }
         }
 
-        let playlist = self
-            .playlists
-            .get_mut(&playlist_uuid)
-            .ok_or_else(|| Report::new(LibraryError::UnknownPlaylist(playlist_uuid)))?;
+        let playlist = self.playlists.get_mut(&playlist_uuid).ok_or_else(|| Report::new(LibraryError::UnknownPlaylist(playlist_uuid)))?;
         playlist.add_entry(entry);
         playlist.mark_dirty();
         Ok(())
     }
 
-    pub fn insert_into_playlist(
-        &mut self,
-        idx: usize,
-        entry: PlaylistEntry,
-        playlist_uuid: Uuid,
-    ) -> Result<(), Report<LibraryError>> {
+    pub fn insert_into_playlist(&mut self, idx: usize, entry: PlaylistEntry, playlist_uuid: Uuid) -> Result<(), Report<LibraryError>> {
         if let PlaylistEntry::Playlist(uuid_to_add) = entry {
-            let playlist_to_add = self
-                .playlists
-                .get(&uuid_to_add)
-                .ok_or_else(|| Report::new(LibraryError::UnknownPlaylist(uuid_to_add)))?;
-            if self
-                .find_playlist_loop(&[playlist_uuid], playlist_to_add)
-                .is_some()
-            {
-                let playlist = self
-                    .playlists
-                    .get(&playlist_uuid)
-                    .ok_or_else(|| Report::new(LibraryError::UnknownPlaylist(playlist_uuid)))?;
-                return Err(Report::new(LibraryError::PlaylistLoop(
-                    playlist_uuid,
-                    playlist.name.clone(),
-                )));
+            let playlist_to_add = self.playlists.get(&uuid_to_add).ok_or_else(|| Report::new(LibraryError::UnknownPlaylist(uuid_to_add)))?;
+            if self.find_playlist_loop(&[playlist_uuid], playlist_to_add).is_some() {
+                let playlist = self.playlists.get(&playlist_uuid).ok_or_else(|| Report::new(LibraryError::UnknownPlaylist(playlist_uuid)))?;
+                return Err(Report::new(LibraryError::PlaylistLoop(playlist_uuid, playlist.name.clone())));
             }
         }
 
-        let playlist = self
-            .playlists
-            .get_mut(&playlist_uuid)
-            .ok_or_else(|| Report::new(LibraryError::UnknownPlaylist(playlist_uuid)))?;
+        let playlist = self.playlists.get_mut(&playlist_uuid).ok_or_else(|| Report::new(LibraryError::UnknownPlaylist(playlist_uuid)))?;
         playlist.insert_entry(idx, entry);
         playlist.mark_dirty();
         Ok(())
     }
 
-    pub fn remove_from_playlist(
-        &mut self,
-        idx: usize,
-        playlist_uuid: Uuid,
-    ) -> Result<PlaylistEntry, Report<LibraryError>> {
+    pub fn remove_from_playlist(&mut self, idx: usize, playlist_uuid: Uuid) -> Result<PlaylistEntry, Report<LibraryError>> {
         if let Some(playlist) = self.playlists.get_mut(&playlist_uuid) {
             let entry = playlist.remove(idx);
             playlist.mark_dirty();
@@ -605,14 +452,9 @@ impl MediaLibrary {
     }
 
     pub fn refresh_song_metadata(&mut self, uuid: Uuid) -> Result<bool, Report<LibraryError>> {
-        let song = self
-            .songs
-            .get(&uuid)
-            .ok_or_else(|| Report::new(LibraryError::UnknownSong(uuid)))?;
+        let song = self.songs.get(&uuid).ok_or_else(|| Report::new(LibraryError::UnknownSong(uuid)))?;
         let updated_song = read_song_metadata(&song.path, uuid);
-        if let Some(updated_song) = updated_song
-            && song != &updated_song
-        {
+        if let Some(updated_song) = updated_song && song != &updated_song {
             self.songs.insert(uuid, updated_song);
             self.dirty = true;
             Ok(true)
@@ -624,11 +466,7 @@ impl MediaLibrary {
 
 fn read_song_metadata(path: impl AsRef<Path> + ToString, uuid: Uuid) -> Option<AudioSource> {
     let tag = ratag::tag::Basic::from_file(&path).ok()?;
-    let title = if let Some(title) = &tag.title {
-        title.to_string()
-    } else {
-        path.as_ref().file_name()?.to_str()?.to_string()
-    };
+    let title = if let Some(title) = &tag.title { title.to_string() } else { path.as_ref().file_name()?.to_str()?.to_string() };
     Some(AudioSource {
         uuid,
         path: path.to_string(),
