@@ -13,3 +13,5 @@ thiserror = "2.0.20"
 error-stack = { version = "0.8.0"}
 iced = "0.14.0"
 ratag = "0.2.0"
+symphonia = { version = "0.6.1", features = ["all-formats", "all-codecs", "all-meta"] }
+rodio = { version = "0.23.0", features = ["symphonia-all"] }

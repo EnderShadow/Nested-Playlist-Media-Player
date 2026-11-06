@@ -1,4 +1,5 @@
 mod gui;
+mod player;
 
 use media_player::{Config, MediaLibrary};
 use std::fs::File;
