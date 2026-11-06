@@ -1,9 +1,10 @@
-use crate::MEDIA_LIBRARY;
+use crate::{player, MEDIA_LIBRARY};
 
 use iced::widget::{button, column, container, responsive, row, rule::horizontal as horizontal_rule, scrollable, slider, space, text};
-use iced::{Alignment, Element, Length, Size};
+use iced::{Alignment, Background, Border, Color, Element, Length, Size, Theme};
 use media_player::{AudioSource, PlaylistInfo};
 use uuid::Uuid;
+use crate::player::{current_song, PlayerState, player_state, play_song, resume_player, pause_player, song_progress};
 
 const TABLE_ROW_HEIGHT: f32 = 42.0;
 const TABLE_HEADER_HEIGHT: f32 = 42.0;
@@ -36,6 +37,16 @@ pub enum MediaPlayerState {
     Stopped,
     Paused,
     Playing,
+}
+
+impl From<PlayerState> for MediaPlayerState {
+    fn from(value: PlayerState) -> Self {
+        match value {
+            PlayerState::Stopped => MediaPlayerState::Stopped,
+            PlayerState::Paused => MediaPlayerState::Paused,
+            PlayerState::Playing => MediaPlayerState::Playing,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -115,20 +126,30 @@ impl UIState {
     }
 
     pub fn update(&mut self, message: UIMessage) {
+        self.current_song = current_song();
+        self.player_state = MediaPlayerState::from(player_state());
+        self.song_progress = song_progress().as_secs_f64() / self.current_song.map(|uuid| MEDIA_LIBRARY.get().unwrap().read().unwrap().get_song_info(&uuid).unwrap().duration.as_secs_f64()).unwrap_or(1.0);
+
         match message {
             UIMessage::SelectTab(selected_tab) => {
                 self.selected_tab = selected_tab;
             }
             UIMessage::SelectSong(selected_song) => {
-                self.selected_song = selected_song;
-
-                if let Some(index) = selected_song && let Some(song) = self.songs.get(index) {
+                if self.selected_song != selected_song {
+                    self.selected_song = selected_song;
+                } else if let Some(index) = selected_song && let Some(song) = self.songs.get(index) {
+                    play_song(song);
                     self.current_song = Some(song.uuid);
                     self.song_progress = 0.0;
+                    self.player_state = MediaPlayerState::from(player_state());
                 }
             }
             UIMessage::SelectPlaylist(selected_playlist) => {
-                self.selected_playlist = selected_playlist;
+                if self.selected_playlist != selected_playlist {
+                    self.selected_playlist = selected_playlist;
+                } else {
+                    // TODO: Open playlist
+                }
             }
             UIMessage::ScrollSongs(first_visible_song) => {
                 self.first_visible_song = first_visible_song;
@@ -139,16 +160,22 @@ impl UIState {
             UIMessage::Play => {
                 if self.current_song.is_none() {
                     if let Some(index) = self.selected_song {
-                        self.current_song = self.songs.get(index).map(|song| song.uuid);
+                        let song = self.songs.get(index).unwrap();
+                        play_song(song);
+                        self.current_song = Some(song.uuid);
                     } else if let Some(first_song) = self.songs.first() {
+                        play_song(first_song);
                         self.current_song = Some(first_song.uuid);
                         self.selected_song = Some(0);
                     }
+                    self.player_state = MediaPlayerState::from(player_state());
+                } else {
+                    resume_player();
+                    self.player_state = MediaPlayerState::Playing;
                 }
-
-                self.player_state = MediaPlayerState::Playing;
             }
             UIMessage::Pause => {
+                pause_player();
                 self.player_state = MediaPlayerState::Paused;
             }
             UIMessage::NextSong => {
@@ -181,20 +208,23 @@ impl UIState {
             .fold(column![space().height(Length::Fixed(top_spacer_height))].spacing(0), |rows, (visible_index, song)| {
                 let index = start + visible_index;
                 let selected = self.selected_song == Some(index);
-                let title = if selected { format!("▶ {}", song.title) } else { song.title.clone() };
 
                 let row = row![
-                    table_cell(title, 3),
+                    table_cell(song.title.clone(), 3),
                     table_cell(song.artist.as_deref().unwrap_or("Unknown artist"), 2),
                     table_cell(song.album.as_deref().unwrap_or("Unknown album"), 2),
                     table_cell(format_duration(song.duration), 1),
-                ]
-                .spacing(8)
-                .padding(8)
-                .height(Length::Fixed(TABLE_ROW_HEIGHT))
-                .align_y(Alignment::Center);
+                ].spacing(8).padding(8).height(Length::Fixed(TABLE_ROW_HEIGHT)).align_y(Alignment::Center);
 
-                rows.push(button(row).width(Length::Fill).height(Length::Fixed(TABLE_ROW_HEIGHT)).on_press(UIMessage::SelectSong(Some(index))))
+                let row_button = button(row).width(Length::Fill).height(Length::Fixed(TABLE_ROW_HEIGHT)).on_press(UIMessage::SelectSong(Some(index)));
+
+                let button = if selected {
+                    row_button.style(selected_table_row_style)
+                } else {
+                    row_button
+                };
+
+                rows.push(button)
             }).push(space().height(Length::Fixed(bottom_spacer_height)));
 
         column![
@@ -226,12 +256,20 @@ impl UIState {
             .fold(column![space().height(Length::Fixed(top_spacer_height))].spacing(0), |rows, (visible_index, playlist)| {
                 let index = start + visible_index;
                 let selected = self.selected_playlist == Some(index);
-                let name = if selected { format!("▶ {}", playlist.info.name) } else { playlist.info.name.clone() };
+                let name = playlist.info.name.clone();
 
                 let row = row![table_cell(name, 3), table_cell(&playlist.info.description, 4), table_cell(playlist.entry_count.to_string(), 1),]
                     .spacing(8).padding(8).height(Length::Fixed(TABLE_ROW_HEIGHT)).align_y(Alignment::Center);
 
-                rows.push(button(row).width(Length::Fill).height(Length::Fixed(TABLE_ROW_HEIGHT)).on_press(UIMessage::SelectPlaylist(Some(index))))
+                let row_button = button(row).width(Length::Fill).height(Length::Fixed(TABLE_ROW_HEIGHT)).on_press(UIMessage::SelectPlaylist(Some(index)));
+
+                let row_button = if selected {
+                    row_button.style(selected_table_row_style)
+                } else {
+                    row_button
+                };
+
+                rows.push(row_button)
             }).push(space().height(Length::Fixed(bottom_spacer_height)));
 
         column![
@@ -320,6 +358,24 @@ fn first_visible_row_for_selection(selected_index: usize, current_first_visible_
         selected_index.saturating_add(1).saturating_sub(visible_rows).min(max_first_visible_row(total_rows, visible_rows))
     } else {
         current_first_visible_row
+    }
+}
+
+fn selected_table_row_style(_theme: &Theme, status: iced::widget::button::Status) -> iced::widget::button::Style {
+    let background_color = match status {
+        iced::widget::button::Status::Hovered => Color::from_rgb(0.18, 0.42, 0.75),
+        iced::widget::button::Status::Pressed => Color::from_rgb(0.12, 0.32, 0.62),
+        _ => Color::from_rgb(0.14, 0.36, 0.68),
+    };
+
+    iced::widget::button::Style {
+        background: Some(Background::Color(background_color)),
+        text_color: Color::WHITE,
+        border: Border {
+            radius: 4.0.into(),
+            ..Border::default()
+        },
+        ..iced::widget::button::Style::default()
     }
 }
 
