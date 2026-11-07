@@ -14,6 +14,7 @@ static PLAYER: LazyLock<Mutex<Player>> = LazyLock::new(|| Mutex::new(Player {
     current_song: None,
     current_index: None,
     player_state: PlayerState::Stopped,
+    generation: 0,
     queue: Vec::new(),
     queue_state: Vec::new(),
     player: rodio::Player::connect_new(AUDIO_SINK_HANDLE.mixer())
@@ -30,6 +31,7 @@ struct Player {
     current_song: Option<Uuid>,
     current_index: Option<usize>,
     player_state: PlayerState,
+    generation: u64,
     queue: Vec<PlaylistEntry>,
     queue_state: Vec<usize>,
     player: rodio::Player
@@ -37,6 +39,7 @@ struct Player {
 
 impl Player {
     fn stop(&mut self, preserve_queue: bool) {
+        self.generation = self.generation.wrapping_add(1);
         self.player.stop();
         self.player_state = PlayerState::Stopped;
         if !preserve_queue {
@@ -65,6 +68,10 @@ impl Player {
                     let song_path = MEDIA_LIBRARY.get().unwrap().read().unwrap().get_song_info(current_song).map(|x| x.path).unwrap();
                     let file = File::open(song_path).unwrap();
                     self.player.append(rodio::Decoder::try_from(file).unwrap());
+                    let generation = self.generation;
+                    self.player.append(rodio::source::EmptyCallback::new(Box::new(move || {
+                        std::thread::spawn(move || song_ended(generation));
+                    })));
                     self.player_state = PlayerState::Playing;
                 }
             },
@@ -148,6 +155,18 @@ impl Player {
             self.player.pause();
             self.player_state = PlayerState::Paused;
         }
+    }
+}
+
+fn song_ended(generation: u64) {
+    let mut player = PLAYER.lock().unwrap();
+    if player.generation != generation || player.player_state != PlayerState::Playing {
+        return;
+    }
+    player.stop(true);
+    player.next();
+    if player.current_song.is_some() {
+        player.play();
     }
 }
 
