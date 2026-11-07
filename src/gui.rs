@@ -29,7 +29,7 @@ struct UIState {
     #[educe(Default(expression = Duration::MAX))]
     current_song_duration: Duration,
     song_progress: f64,
-    #[educe(Default(expression = 100.0))]
+    #[educe(Default(expression = 50.0))]
     volume: f32,
     #[educe(Default(expression = Instant::now()))]
     last_click_time: Instant,

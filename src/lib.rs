@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use std::fs;
 use std::fs::File;
 use std::io::Write;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 use symphonia::core::formats::{FormatOptions, TrackType};
 use symphonia::core::formats::probe::Hint;
@@ -37,7 +37,7 @@ pub enum LibraryError {
 pub struct AudioSource {
     pub uuid: Uuid,
     #[serde(alias = "uri")]
-    pub path: String,
+    pub path: PathBuf,
     pub title: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub artist: Option<String>,
@@ -66,11 +66,11 @@ pub struct PlaylistInfo {
 
 #[derive(Serialize, Deserialize)]
 pub struct Playlist {
-    pub uuid: Uuid,
-    pub name: String,
-    pub description: String,
+    uuid: Uuid,
+    name: String,
+    description: String,
     #[serde(alias = "sources")]
-    pub contents: Vec<PlaylistEntry>,
+    contents: Vec<PlaylistEntry>,
     #[serde(skip)]
     dirty: bool,
 }
@@ -125,7 +125,7 @@ impl Playlist {
         self.contents
             .iter()
             .map(|entry| match entry {
-                PlaylistEntry::Playlist(id) => library.playlists[id].flat_len(library),
+                PlaylistEntry::Playlist(id) => library.playlists.get(id).map(|playlist| playlist.flat_len(library)).unwrap_or(0),
                 PlaylistEntry::Song(_) => 1,
             }).sum()
     }
@@ -182,6 +182,7 @@ impl MediaLibrary {
             // This should never fail
             let data = serde_json::to_string(&self.songs.values().collect::<Vec<_>>()).expect("Failed to serialize library");
             file.write_all(data.as_bytes()).map_err(|e| LoadSaveError::from(e).into_report().attach("Failed to write library to file"))?;
+            file.sync_all().map_err(|e| LoadSaveError::from(e).into_report().attach("Failed to sync library file"))?;
             fs::rename(new_library_file, library_file).map_err(|e| LoadSaveError::from(e).into_report().attach("Failed to overwrite old library file with new library file"))?;
             self.dirty = false;
         }
@@ -192,6 +193,7 @@ impl MediaLibrary {
             let mut file = File::create(&temp_file).map_err(|e| LoadSaveError::from(e).into_report().attach("Failed to create playlist file"))?;
             let data = serde_json::to_string(&playlist).map_err(|e| LoadSaveError::from(e).into_report().attach("Failed to serialize playlist file"))?;
             file.write_all(data.as_bytes()).map_err(|e| LoadSaveError::from(e).into_report().attach("Failed to write playlist file to file"))?;
+            file.sync_all().map_err(|e| LoadSaveError::from(e).into_report().attach("Failed to sync playlist file"))?;
             fs::rename(temp_file, playlist_file).map_err(|e| LoadSaveError::from(e).into_report().attach("Failed to overwrite playlist file with new playlist file"))?;
             playlist.mark_clean();
         }
@@ -239,7 +241,7 @@ impl MediaLibrary {
             let path = song.path.clone();
             // fallback to the metadata read from the library file if we cannot read the metadata from the file (e.g. song doesn't exist on disk or is not of a compatible file type with the metadata parsing library)
             let song = read_song_metadata(&path, song.uuid).unwrap_or_else(|| {
-                println!("Failed to read metadata for file {}: Using metadata stored in library", path);
+                println!("Failed to read metadata for file {:?}: Using metadata stored in library", path);
                 song
             });
             self.songs.insert(song.uuid, song);
@@ -326,7 +328,7 @@ impl MediaLibrary {
             }).collect()
     }
 
-    pub fn add_song(&mut self, path: String) -> Uuid {
+    pub fn add_song(&mut self, path: PathBuf) -> Uuid {
         let uuid = loop {
             let uuid = Uuid::new_v4();
             if !self.songs.contains_key(&uuid) {
@@ -349,7 +351,7 @@ impl MediaLibrary {
                 track_number: None,
                 track_count: None,
                 year: None,
-                duration: Default::default(),
+                duration: Duration::MAX,
             }
         };
 
@@ -392,7 +394,6 @@ impl MediaLibrary {
             let uuid = playlist.uuid;
             self.playlists.iter_mut().for_each(|(_, playlist)| {
                 playlist.remove_all(uuid);
-                playlist.mark_dirty();
             });
 
             let playlist_file = Path::new(&self.config.data_directory).join("playlists").join(format!("{}.json", uuid));
@@ -418,7 +419,6 @@ impl MediaLibrary {
 
         let playlist = self.playlists.get_mut(&playlist_uuid).ok_or_else(|| Report::new(LibraryError::UnknownPlaylist(playlist_uuid)))?;
         playlist.add_entry(entry);
-        playlist.mark_dirty();
         Ok(())
     }
 
@@ -433,7 +433,6 @@ impl MediaLibrary {
 
         let playlist = self.playlists.get_mut(&playlist_uuid).ok_or_else(|| Report::new(LibraryError::UnknownPlaylist(playlist_uuid)))?;
         playlist.insert_entry(idx, entry);
-        playlist.mark_dirty();
         Ok(())
     }
 
@@ -493,7 +492,7 @@ impl MediaLibrary {
     }
 }
 
-fn read_song_metadata(path: impl AsRef<Path> + ToString, uuid: Uuid) -> Option<AudioSource> {
+fn read_song_metadata(path: impl AsRef<Path>, uuid: Uuid) -> Option<AudioSource> {
     let file = File::open(&path).ok()?;
     let mss = MediaSourceStream::new(Box::new(file), Default::default());
     let mut hint = Hint::new();
@@ -546,9 +545,9 @@ fn read_song_metadata(path: impl AsRef<Path> + ToString, uuid: Uuid) -> Option<A
 
     let track = format.default_track(TrackType::Audio)?;
     let duration = if let Some(time_base) = track.time_base && let Some(duration) = track.duration {
-        time_base.calc_duration(duration).map(|t| Duration::from_nanos_u128(t.as_nanos() as u128)).unwrap_or(Duration::ZERO)
+        time_base.calc_duration(duration).map(|t| Duration::from_nanos_u128(t.as_nanos() as u128)).unwrap_or(Duration::MAX)
     } else {
-        Duration::ZERO
+        Duration::MAX
     };
 
     if title.is_empty() {
@@ -557,7 +556,7 @@ fn read_song_metadata(path: impl AsRef<Path> + ToString, uuid: Uuid) -> Option<A
 
     Some(AudioSource {
         uuid,
-        path: path.to_string(),
+        path: path.as_ref().to_path_buf(),
         title,
         artist,
         album,
@@ -573,5 +572,5 @@ fn read_song_metadata(path: impl AsRef<Path> + ToString, uuid: Uuid) -> Option<A
 #[derive(Serialize, Deserialize, Default)]
 pub struct Config {
     #[serde(default)]
-    pub data_directory: String,
+    pub data_directory: PathBuf,
 }

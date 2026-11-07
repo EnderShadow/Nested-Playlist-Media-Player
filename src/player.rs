@@ -11,17 +11,21 @@ static AUDIO_SINK_HANDLE: LazyLock<MixerDeviceSink> = LazyLock::new(|| {
     rodio::DeviceSinkBuilder::open_default_sink().expect("Failed to open default sink")
 });
 
-static PLAYER: LazyLock<Mutex<Player>> = LazyLock::new(|| Mutex::new(Player {
-    current_song: None,
-    current_index: None,
-    player_state: PlayerState::Stopped,
-    generation: 0,
-    queue: Vec::new(),
-    queue_state: Vec::new(),
-    player: rodio::Player::connect_new(AUDIO_SINK_HANDLE.mixer()),
-    shuffle_enabled: false,
-    loop_mode: LoopMode::None
-}));
+static PLAYER: LazyLock<Mutex<Player>> = LazyLock::new(|| {
+    let player = Player {
+        current_song: None,
+        current_index: None,
+        player_state: PlayerState::Stopped,
+        generation: 0,
+        queue: Vec::new(),
+        queue_state: Vec::new(),
+        player: rodio::Player::connect_new(AUDIO_SINK_HANDLE.mixer()),
+        shuffle_enabled: false,
+        loop_mode: LoopMode::None
+    };
+    player.player.set_volume(0.5);
+    Mutex::new(player)
+});
 
 #[derive(Copy, Clone, Eq, PartialEq)]
 pub enum PlayerState {
@@ -78,14 +82,21 @@ impl Player {
                     self.next();
                 }
                 if let Some(current_song) = &self.current_song {
-                    let song_path = MEDIA_LIBRARY.get().unwrap().read().unwrap().get_song(current_song).map(|x| x.path).unwrap();
-                    let file = File::open(song_path).unwrap();
-                    self.player.append(rodio::Decoder::try_from(file).unwrap());
-                    let generation = self.generation;
-                    self.player.append(rodio::source::EmptyCallback::new(Box::new(move || {
-                        std::thread::spawn(move || song_ended(generation));
-                    })));
-                    self.player_state = PlayerState::Playing;
+                    let song_path = MEDIA_LIBRARY.get().unwrap().read().unwrap().get_song(current_song).map(|x| x.path);
+                    if let Some(song_path) = song_path {
+                        let file = File::open(song_path);
+                        if let Ok(file) = file {
+                            let decoder = rodio::Decoder::try_from(file);
+                            if let Ok(decoder) = decoder {
+                                self.player.append(decoder);
+                                let generation = self.generation;
+                                self.player.append(rodio::source::EmptyCallback::new(Box::new(move || {
+                                    std::thread::spawn(move || song_ended(generation));
+                                })));
+                                self.player_state = PlayerState::Playing;
+                            }
+                        }
+                    }
                 }
             },
             PlayerState::Paused => {
@@ -108,7 +119,10 @@ impl Player {
                 }
             }).sum();
 
+            // queue's of length 1 are intentionally discarded when shuffling since shuffling the entire library always gives queues of length 1 and repeating the same song is achievable with the loop mode.
             if queue_len > 1 {
+                // release the lock on MEDIA_LIBRARY since walk_queue will need to acquire it.
+                drop(media_library);
                 let index = (0..queue_len).choose(&mut rand::rng()).unwrap();
                 let (uuid, queue_state) = self.walk_queue(index).expect("Queue changed while we had an exclusive lock on it. This should never happen.");
                 self.current_song = Some(uuid);
@@ -180,9 +194,16 @@ impl Player {
                         }
                     }
                     PlaylistEntry::Playlist(uuid) => {
-                        iter_stack.push(current_iter);
-                        current_iter = MEDIA_LIBRARY.get().unwrap().read().unwrap().get_playlist_contents(uuid).unwrap().into_iter();
-                        queue_stack.push(0);
+                        let playlist_contents = MEDIA_LIBRARY.get().unwrap().read().unwrap().get_playlist_contents(uuid);
+                        if let Some(playlist_contents) = playlist_contents {
+                            iter_stack.push(current_iter);
+                            current_iter = playlist_contents.into_iter();
+                            queue_stack.push(0);
+                        } else {
+                            current_index += 1;
+                            let last = queue_stack.pop().unwrap();
+                            queue_stack.push(last + 1);
+                        }
                     }
                 }
             } else if !iter_stack.is_empty() {
@@ -197,7 +218,10 @@ impl Player {
     }
 
     fn seek(&mut self, position: Duration) {
-        self.player.try_seek(position).expect("Failed to seek");
+        let result = self.player.try_seek(position);
+        if result.is_err() && let Some(uuid) = self.current_song{
+            println!("Failed to seek to position {:.2} seconds in song with uuid: {}", position.as_secs_f32(), uuid);
+        }
     }
 
     fn pause(&mut self) {
@@ -274,8 +298,9 @@ pub fn next_song() {
     let mut player = PLAYER.lock().unwrap();
     let paused = player.player_state == PlayerState::Paused;
     player.stop(true);
-    player.next();
-    player.play();
+    if player.next() {
+        player.play();
+    }
     if paused {
         player.pause();
     }
