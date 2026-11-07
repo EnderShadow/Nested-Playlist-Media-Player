@@ -330,10 +330,13 @@ pub fn song_progress() -> Duration {
 }
 
 pub fn seek(position: f64) {
+    if !position.is_finite() {
+        return;
+    }
+
     let mut player = PLAYER.lock().unwrap();
-    if let Some(current_song) = player.current_song && let Some(song) = MEDIA_LIBRARY.get().unwrap().read().unwrap().get_song(&current_song){
-        let duration = song.duration;
-        player.seek(duration.mul_f64(position));
+    if let Some(current_song) = player.current_song && let Some(song) = MEDIA_LIBRARY.get().unwrap().read().unwrap().get_song(&current_song) && let Some(duration) = song.duration {
+        player.seek(duration.mul_f64(position.clamp(0.0, 1.0)));
     }
 }
 

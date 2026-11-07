@@ -53,8 +53,12 @@ pub struct AudioSource {
     pub track_count: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub year: Option<String>,
-    #[serde(with = "serde_millis")]
-    pub duration: Duration,
+    #[serde(default, skip_serializing_if = "Option::is_none", serialize_with = "serde_millis::serialize", deserialize_with = "deserialize_duration")]
+    pub duration: Option<Duration>,
+}
+
+fn deserialize_duration<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<Option<Duration>, D::Error> {
+    serde_millis::deserialize(deserializer).map(|duration: Option<Duration>| duration.filter(|duration| !duration.is_zero()))
 }
 
 #[derive(Clone, Debug)]
@@ -350,7 +354,7 @@ impl MediaLibrary {
                 track_number: None,
                 track_count: None,
                 year: None,
-                duration: Duration::MAX,
+                duration: None,
             }
         };
 
@@ -546,9 +550,9 @@ fn read_song_metadata(path: impl AsRef<Path>, uuid: Uuid) -> Option<AudioSource>
 
     let track = format.default_track(TrackType::Audio)?;
     let duration = if let Some(time_base) = track.time_base && let Some(duration) = track.duration {
-        time_base.calc_duration(duration).map(|t| Duration::from_nanos_u128(t.as_nanos() as u128)).unwrap_or(Duration::MAX)
+        time_base.calc_duration(duration).map(|t| Duration::from_nanos_u128(t.as_nanos() as u128)).filter(|duration| !duration.is_zero())
     } else {
-        Duration::MAX
+        None
     };
 
     if title.is_empty() {

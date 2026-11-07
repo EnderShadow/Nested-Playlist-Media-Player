@@ -26,8 +26,7 @@ struct UIState {
     first_visible_playlist: usize,
     player_state: MediaPlayerState,
     current_song: Option<Uuid>,
-    #[educe(Default(expression = Duration::MAX))]
-    current_song_duration: Duration,
+    current_song_duration: Option<Duration>,
     song_progress: f64,
     #[educe(Default(expression = 50.0))]
     volume: f32,
@@ -201,14 +200,16 @@ impl UIState {
                 next_song()
             }
             UIMessage::PreviousSong => {
-                if self.current_song_duration.mul_f64(self.song_progress / SONG_PROGRESS_DIVISIONS) > Duration::from_secs(5) {
+                if song_progress() > Duration::from_secs(5) {
                     seek(0.0);
                 } else {
                     previous_song();
                 }
             }
             UIMessage::ProgressChanged(progress) => {
-                seek(progress / SONG_PROGRESS_DIVISIONS);
+                if self.current_song_duration.is_some() {
+                    seek(progress / SONG_PROGRESS_DIVISIONS);
+                }
             }
             UIMessage::VolumeChanged(volume) => {
                 self.volume = volume;
@@ -244,8 +245,8 @@ impl UIState {
                 let (state, shuffle_enabled, loop_mode) = player_state();
                 self.player_state = MediaPlayerState::from(state);
                 self.current_song = current_song();
-                self.current_song_duration = self.current_song.map(|uuid| MEDIA_LIBRARY.get().unwrap().read().unwrap().get_song(&uuid).map(|audio| audio.duration).unwrap_or(Duration::MAX)).unwrap_or(Duration::MAX);
-                self.song_progress = SONG_PROGRESS_DIVISIONS * song_progress().as_secs_f64() / self.current_song_duration.as_secs_f64();
+                self.current_song_duration = self.current_song.and_then(|uuid| MEDIA_LIBRARY.get().unwrap().read().unwrap().get_song(&uuid).and_then(|audio| audio.duration)).filter(|duration| !duration.is_zero());
+                self.song_progress = self.current_song_duration.map(|duration| (SONG_PROGRESS_DIVISIONS * song_progress().as_secs_f64() / duration.as_secs_f64()).clamp(0.0, SONG_PROGRESS_DIVISIONS)).unwrap_or(0.0);
                 self.shuffle_enabled = shuffle_enabled;
                 self.loop_mode = loop_mode;
             }
@@ -275,7 +276,7 @@ impl UIState {
                     table_cell(song.title.clone(), 3),
                     table_cell(song.artist.as_deref().unwrap_or("Unknown artist"), 2),
                     table_cell(song.album.as_deref().unwrap_or("Unknown album"), 2),
-                    table_cell(format_duration(Some(song.duration)), 1),
+                    table_cell(format_duration(song.duration), 1),
                 ].spacing(8).padding(8).height(Length::Fixed(TABLE_ROW_HEIGHT)).align_y(Alignment::Center);
 
                 let row_button = button(row).width(Length::Fill).height(Length::Fixed(TABLE_ROW_HEIGHT)).on_press(UIMessage::SelectSong(Some(index)));
@@ -366,8 +367,9 @@ impl UIState {
     fn media_controls(&self) -> Element<'_, UIMessage> {
         let current_song_title = self.current_song.and_then(|uuid| self.songs.iter().find(|song| song.uuid == uuid)).map(|song| song.title.as_str()).unwrap_or("No song selected");
 
-        let progress_text = if self.player_state != MediaPlayerState::Stopped && self.current_song_duration != Duration::MAX {
-            format!("{} / {}", format_duration(Some(self.current_song_duration.mul_f64(self.song_progress / SONG_PROGRESS_DIVISIONS))), format_duration(Some(self.current_song_duration)))
+        let progress_text = if self.player_state != MediaPlayerState::Stopped && let Some(duration) = self.current_song_duration {
+            let position = duration.mul_f64((self.song_progress / SONG_PROGRESS_DIVISIONS).clamp(0.0, 1.0));
+            format!("{} / {}", format_duration(Some(position)), format_duration(Some(duration)))
         } else {
             "-:-- / -:--".to_string()
         };
@@ -390,9 +392,27 @@ impl UIState {
             button("Play").on_press(UIMessage::Play)
         };
 
+        let progress_slider = slider(
+            0.0..=SONG_PROGRESS_DIVISIONS,
+            if self.current_song_duration.is_some() { self.song_progress } else { 0.0 },
+            UIMessage::ProgressChanged,
+        )
+        .style(|theme, status| {
+            let mut style = slider::default(theme, status);
+            if self.current_song_duration.is_none() {
+                let palette = theme.extended_palette();
+                style.rail.backgrounds = (
+                    palette.background.weak.color.into(),
+                    palette.background.strong.color.into(),
+                );
+                style.handle.background = palette.background.weak.color.into();
+            }
+            style
+        });
+
         column![
             row![text(current_song_title).size(18), space().width(Length::Fill), text(progress_text),].align_y(Alignment::Center),
-            slider(0.0..=SONG_PROGRESS_DIVISIONS, self.song_progress, UIMessage::ProgressChanged),
+            progress_slider,
             row![
                 shuffle_button,
                 loop_mode_button,
