@@ -4,7 +4,7 @@ use crate::{MEDIA_LIBRARY};
 
 use iced::widget::{button, column, container, responsive, row, rule::horizontal as horizontal_rule, scrollable, slider, space, text};
 use iced::{Alignment, Background, Border, Color, Element, Length, Size, Subscription, Theme};
-use iced_aw::ContextMenu;
+use iced_aw::{ContextMenu, TabLabel, Tabs};
 use media_player::{AudioSource, PlaylistInfo};
 use uuid::Uuid;
 use crate::player::{current_song, PlayerState, player_state, play_song, resume_player, pause_player, song_progress, seek, set_volume, previous_song, next_song, enqueue_song, play_playlist, enqueue_playlist};
@@ -133,18 +133,23 @@ impl UIState {
     }
 
     pub fn view(&self) -> Element<'_, UIMessage> {
+        let tabs = Tabs::new(UIMessage::SelectTab)
+            .push(
+                MediaPlayerTab::Songs,
+                TabLabel::Text("Songs".to_string()),
+                self.song_table(),
+            )
+            .push(
+                MediaPlayerTab::Playlists,
+                TabLabel::Text("Playlists".to_string()),
+                self.playlist_table(),
+            )
+            .set_active_tab(&self.selected_tab);
 
-        let tabs = row![
-            tab_button("Songs", MediaPlayerTab::Songs, self.selected_tab == MediaPlayerTab::Songs,),
-            tab_button("Playlists", MediaPlayerTab::Playlists, self.selected_tab == MediaPlayerTab::Playlists,),
-        ].spacing(8);
-
-        let table = match self.selected_tab {
-            MediaPlayerTab::Songs => self.song_table(),
-            MediaPlayerTab::Playlists => self.playlist_table(),
-        };
-
-        column![tabs, horizontal_rule(1), table, horizontal_rule(1), self.media_controls(),].padding(16).spacing(12).into()
+        column![tabs, horizontal_rule(1), self.media_controls()]
+            .padding(16)
+            .spacing(12)
+            .into()
     }
 
     pub fn update(&mut self, message: UIMessage) {
@@ -404,11 +409,6 @@ fn selected_table_row_style(_theme: &Theme, status: iced::widget::button::Status
     }
 }
 
-fn tab_button(label: &'static str, tab: MediaPlayerTab, selected: bool) -> iced::widget::Button<'static, UIMessage> {
-    let label = if selected { format!("[ {label} ]") } else { label.to_string() };
-
-    button(text(label)).on_press(UIMessage::SelectTab(tab))
-}
 
 fn table_cell<'a>(content: impl Into<String>, width_portion: u16) -> Element<'a, UIMessage> {
     container(text(content.into())).width(Length::FillPortion(width_portion)).into()
