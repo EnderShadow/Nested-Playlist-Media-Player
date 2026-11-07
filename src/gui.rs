@@ -66,6 +66,7 @@ impl From<PlayerState> for MediaPlayerState {
 struct PlaylistRow {
     info: PlaylistInfo,
     entry_count: usize,
+    song_count: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -111,11 +112,12 @@ impl UIState {
         self.songs.sort_by(|a, b| a.title.to_lowercase().cmp(&b.title.to_lowercase()).then_with(|| a.artist.as_deref().unwrap_or("").to_lowercase().cmp(&b.artist.as_deref().unwrap_or("").to_lowercase())));
 
         self.playlists = library.get_playlists().into_iter().filter_map(|uuid| {
-                let info = library.get_playlist_info(&uuid)?;
-                let entry_count = library.get_playlist_contents(uuid).map(|contents| contents.len()).unwrap_or_default();
+            let info = library.get_playlist_info(&uuid)?;
+            let entry_count = library.get_playlist_contents(uuid).map(|contents| contents.len()).unwrap_or_default();
+            let song_count = library.get_playlist_length(uuid).unwrap_or_default();
 
-                Some(PlaylistRow { info, entry_count })
-            }).collect();
+            Some(PlaylistRow { info, entry_count, song_count })
+        }).collect();
 
         self.playlists.sort_by_key(|playlist| playlist.info.name.to_lowercase());
 
@@ -169,12 +171,8 @@ impl UIState {
                 let click_time = Instant::now();
                 if self.selected_song != selected_song {
                     self.selected_song = selected_song;
-                } else if let Some(index) = selected_song && click_time.duration_since(self.last_click_time) < Duration::from_millis(1000) && let Some(song) = self.songs.get(index) {
-                    if self.player_state == MediaPlayerState::Playing {
-                        enqueue_song(song);
-                    } else {
-                        play_song(song);
-                    }
+                } else if let Some(index) = selected_song && click_time.duration_since(self.last_click_time) < Duration::from_millis(500) && let Some(song) = self.songs.get(index) {
+                    play_song(song);
                 }
                 self.last_click_time = click_time;
             }
@@ -182,7 +180,7 @@ impl UIState {
                 let click_time = Instant::now();
                 if self.selected_playlist != selected_playlist {
                     self.selected_playlist = selected_playlist;
-                } else if let Some(index) = selected_playlist && click_time.duration_since(self.last_click_time) < Duration::from_millis(1000) && let Some(playlist) = self.playlists.get(index) {
+                } else if let Some(index) = selected_playlist && click_time.duration_since(self.last_click_time) < Duration::from_millis(500) && let Some(playlist) = self.playlists.get(index) {
                     // TODO: Open playlist
                 }
                 self.last_click_time = click_time;
@@ -320,7 +318,7 @@ impl UIState {
         let start = clamp_first_visible_row(self.first_visible_playlist, self.playlists.len(), visible_rows);
         let end = visible_end(start, self.playlists.len(), visible_rows);
 
-        let header = row![table_cell("Name", 3), table_cell("Description", 4), table_cell("Entries", 1),].spacing(8).padding(8).height(Length::Fixed(TABLE_HEADER_HEIGHT));
+        let header = row![table_cell("Name", 3), table_cell("Description", 4), table_cell("Songs", 1), table_cell("Entries", 1)].spacing(8).padding(8).height(Length::Fixed(TABLE_HEADER_HEIGHT));
 
         let top_spacer_height = start as f32 * TABLE_ROW_HEIGHT;
         let bottom_spacer_height = self.playlists.len().saturating_sub(end) as f32 * TABLE_ROW_HEIGHT;
@@ -331,7 +329,7 @@ impl UIState {
                 let selected = self.selected_playlist == Some(index);
                 let name = playlist.info.name.clone();
 
-                let row = row![table_cell(name, 3), table_cell(&playlist.info.description, 4), table_cell(playlist.entry_count.to_string(), 1),]
+                let row = row![table_cell(name, 3), table_cell(&playlist.info.description, 4), table_cell(playlist.song_count.to_string(), 1), table_cell(playlist.entry_count.to_string(), 1)]
                     .spacing(8).padding(8).height(Length::Fixed(TABLE_ROW_HEIGHT)).align_y(Alignment::Center);
 
                 let row_button = button(row).width(Length::Fill).height(Length::Fixed(TABLE_ROW_HEIGHT)).on_press(UIMessage::SelectPlaylist(Some(index)));
