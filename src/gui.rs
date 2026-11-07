@@ -7,7 +7,7 @@ use iced::{Alignment, Background, Border, Element, Length, Size, Subscription, T
 use iced_aw::{ContextMenu, TabLabel, Tabs};
 use media_player::{AudioSource, PlaylistInfo};
 use uuid::Uuid;
-use crate::player::{current_song, PlayerState, player_state, play_song, resume_player, pause_player, song_progress, seek, set_volume, previous_song, next_song, enqueue_song, play_playlist, enqueue_playlist};
+use crate::player::{current_song, PlayerState, player_state, play_song, resume_player, pause_player, song_progress, seek, set_volume, previous_song, next_song, enqueue_song, play_playlist, enqueue_playlist, LoopMode, toggle_shuffle, cycle_loop_mode};
 
 const TABLE_ROW_HEIGHT: f32 = 42.0;
 const TABLE_HEADER_HEIGHT: f32 = 42.0;
@@ -33,6 +33,8 @@ struct UIState {
     volume: f32,
     #[educe(Default(expression = Instant::now()))]
     last_click_time: Instant,
+    shuffle_enabled: bool,
+    loop_mode: LoopMode,
 }
 
 #[derive(Debug, Default, Copy, Clone, Eq, PartialEq)]
@@ -84,6 +86,8 @@ pub enum UIMessage {
     EnqueueSong(usize),
     PlayPlaylist(usize),
     EnqueuePlaylist(usize),
+    ToggleShuffle,
+    CycleLoopMode,
 }
 
 impl UIState {
@@ -212,12 +216,6 @@ impl UIState {
                 self.volume = volume;
                 set_volume(volume / 100.0);
             }
-            UIMessage::Tick => {
-                self.player_state = MediaPlayerState::from(player_state());
-                self.current_song = current_song();
-                self.current_song_duration = self.current_song.map(|uuid| MEDIA_LIBRARY.get().unwrap().read().unwrap().get_song_info(&uuid).map(|audio| audio.duration).unwrap_or(Duration::MAX)).unwrap_or(Duration::MAX);
-                self.song_progress = SONG_PROGRESS_DIVISIONS * song_progress().as_secs_f64() / self.current_song_duration.as_secs_f64();
-            }
             UIMessage::PlaySong(index) => {
                 if let Some(song) = self.songs.get(index) {
                     play_song(song);
@@ -237,6 +235,21 @@ impl UIState {
                 if let Some(playlist) = self.playlists.get(index) {
                     enqueue_playlist(&playlist.info);
                 }
+            }
+            UIMessage::ToggleShuffle => {
+                toggle_shuffle();
+            }
+            UIMessage::CycleLoopMode => {
+                cycle_loop_mode();
+            }
+            UIMessage::Tick => {
+                let (state, shuffle_enabled, loop_mode) = player_state();
+                self.player_state = MediaPlayerState::from(state);
+                self.current_song = current_song();
+                self.current_song_duration = self.current_song.map(|uuid| MEDIA_LIBRARY.get().unwrap().read().unwrap().get_song(&uuid).map(|audio| audio.duration).unwrap_or(Duration::MAX)).unwrap_or(Duration::MAX);
+                self.song_progress = SONG_PROGRESS_DIVISIONS * song_progress().as_secs_f64() / self.current_song_duration.as_secs_f64();
+                self.shuffle_enabled = shuffle_enabled;
+                self.loop_mode = loop_mode;
             }
         }
     }
@@ -361,12 +374,37 @@ impl UIState {
             "-:-- / -:--".to_string()
         };
 
-        let play_pause_button = if self.player_state == MediaPlayerState::Playing { button("Pause").on_press(UIMessage::Pause) } else { button("Play").on_press(UIMessage::Play) };
+        let shuffle_button = if self.shuffle_enabled {
+            button("Shuffle On").on_press(UIMessage::ToggleShuffle)
+        } else {
+            button("Shuffle Off").on_press(UIMessage::ToggleShuffle)
+        };
+
+        let loop_mode_button = match self.loop_mode {
+            LoopMode::None => button("Loop Off").on_press(UIMessage::CycleLoopMode),
+            LoopMode::Single => button("Loop Single").on_press(UIMessage::CycleLoopMode),
+            LoopMode::Queue => button("Loop Queue").on_press(UIMessage::CycleLoopMode),
+        };
+
+        let play_pause_button = if self.player_state == MediaPlayerState::Playing {
+            button("Pause").on_press(UIMessage::Pause)
+        } else {
+            button("Play").on_press(UIMessage::Play)
+        };
 
         column![
             row![text(current_song_title).size(18), space().width(Length::Fill), text(progress_text),].align_y(Alignment::Center),
             slider(0.0..=SONG_PROGRESS_DIVISIONS, self.song_progress, UIMessage::ProgressChanged),
-            row![button("Previous").on_press(UIMessage::PreviousSong), play_pause_button, button("Next").on_press(UIMessage::NextSong), space().width(Length::FillPortion(8)), slider(0.0..=100.0, self.volume, UIMessage::VolumeChanged).width(Length::FillPortion(2))].spacing(8).align_y(Alignment::Center),
+            row![
+                shuffle_button,
+                loop_mode_button,
+                space().width(Length::FillPortion(3)),
+                button("Previous").on_press(UIMessage::PreviousSong),
+                play_pause_button,
+                button("Next").on_press(UIMessage::NextSong),
+                space().width(Length::FillPortion(5)),
+                slider(0.0..=100.0, self.volume, UIMessage::VolumeChanged).width(Length::FillPortion(2))
+            ].spacing(8).align_y(Alignment::Center),
         ].spacing(8).into()
     }
 }

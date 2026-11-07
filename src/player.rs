@@ -1,6 +1,7 @@
 use std::fs::File;
 use std::sync::{LazyLock, Mutex};
 use std::time::Duration;
+use rand::prelude::{IndexedRandom, IteratorRandom};
 use rodio::MixerDeviceSink;
 use uuid::Uuid;
 use media_player::{AudioSource, PlaylistEntry, PlaylistInfo};
@@ -17,7 +18,9 @@ static PLAYER: LazyLock<Mutex<Player>> = LazyLock::new(|| Mutex::new(Player {
     generation: 0,
     queue: Vec::new(),
     queue_state: Vec::new(),
-    player: rodio::Player::connect_new(AUDIO_SINK_HANDLE.mixer())
+    player: rodio::Player::connect_new(AUDIO_SINK_HANDLE.mixer()),
+    shuffle_enabled: false,
+    loop_mode: LoopMode::None
 }));
 
 #[derive(Copy, Clone, Eq, PartialEq)]
@@ -27,6 +30,14 @@ pub enum PlayerState {
     Paused
 }
 
+#[derive(Default, Copy, Clone, Eq, PartialEq)]
+pub enum LoopMode {
+    #[default]
+    None,
+    Single,
+    Queue
+}
+
 struct Player {
     current_song: Option<Uuid>,
     current_index: Option<usize>,
@@ -34,7 +45,9 @@ struct Player {
     generation: u64,
     queue: Vec<PlaylistEntry>,
     queue_state: Vec<usize>,
-    player: rodio::Player
+    player: rodio::Player,
+    shuffle_enabled: bool,
+    loop_mode: LoopMode
 }
 
 impl Player {
@@ -65,7 +78,7 @@ impl Player {
                     self.next();
                 }
                 if let Some(current_song) = &self.current_song {
-                    let song_path = MEDIA_LIBRARY.get().unwrap().read().unwrap().get_song_info(current_song).map(|x| x.path).unwrap();
+                    let song_path = MEDIA_LIBRARY.get().unwrap().read().unwrap().get_song(current_song).map(|x| x.path).unwrap();
                     let file = File::open(song_path).unwrap();
                     self.player.append(rodio::Decoder::try_from(file).unwrap());
                     let generation = self.generation;
@@ -83,20 +96,52 @@ impl Player {
         }
     }
 
-    fn next(&mut self) -> bool{
-        let index = self.current_index.map(|i| i + 1).unwrap_or(0);
-        let song = self.walk_queue(index);
-        if let Some((uuid, queue_state)) = song {
-            self.current_song = Some(uuid);
-            self.current_index = Some(index);
-            self.queue_state = queue_state;
-            true
+    fn next(&mut self) -> bool {
+        if self.shuffle_enabled {
+            let media_library = MEDIA_LIBRARY.get().unwrap().read().unwrap();
+
+            let queue_len = self.queue.iter().map(|playlist_entry| {
+                if let PlaylistEntry::Playlist(uuid) = playlist_entry {
+                    media_library.get_playlist_length(*uuid).unwrap_or(0)
+                } else {
+                    1
+                }
+            }).sum();
+
+            if queue_len > 1 {
+                let index = (0..queue_len).choose(&mut rand::rng()).unwrap();
+                let (uuid, queue_state) = self.walk_queue(index).expect("Queue changed while we had an exclusive lock on it. This should never happen.");
+                self.current_song = Some(uuid);
+                self.current_index = Some(index);
+                self.queue_state = queue_state;
+                true
+            } else if let Some(uuid) = media_library.get_song_uuids().choose(&mut rand::rng()).cloned() {
+                self.current_song = Some(uuid);
+                self.current_index = Some(0);
+                self.queue_state.clear();
+                self.queue_state.push(0);
+                self.queue.clear();
+                self.queue.push(PlaylistEntry::Song(uuid));
+                true
+            } else {
+                self.stop(false);
+                false
+            }
         } else {
-            self.stop(true);
-            self.current_song = None;
-            self.current_index = None;
-            self.queue_state.clear();
-            false
+            let index = self.current_index.map(|i| i + 1).unwrap_or(0);
+            let song = self.walk_queue(index);
+            if let Some((uuid, queue_state)) = song {
+                self.current_song = Some(uuid);
+                self.current_index = Some(index);
+                self.queue_state = queue_state;
+                true
+            } else {
+                self.stop(true);
+                self.current_song = None;
+                self.current_index = None;
+                self.queue_state.clear();
+                false
+            }
         }
     }
 
@@ -169,7 +214,19 @@ fn song_ended(generation: u64) {
         return;
     }
     player.stop(true);
-    if player.next() {
+    let should_play = match player.loop_mode {
+        LoopMode::None => {
+            player.next()
+        }
+        LoopMode::Single => {
+            true
+        }
+        LoopMode::Queue => {
+            player.next();
+            true
+        }
+    };
+    if should_play {
         player.play();
     }
 }
@@ -240,9 +297,9 @@ pub fn current_song() -> Option<Uuid> {
     player.current_song
 }
 
-pub fn player_state() -> PlayerState {
+pub fn player_state() -> (PlayerState, bool, LoopMode) {
     let player = PLAYER.lock().unwrap();
-    player.player_state
+    (player.player_state, player.shuffle_enabled, player.loop_mode)
 }
 
 pub fn song_progress() -> Duration {
@@ -253,7 +310,7 @@ pub fn song_progress() -> Duration {
 pub fn seek(position: f64) {
     let mut player = PLAYER.lock().unwrap();
     if let Some(current_song) = player.current_song {
-        let duration = MEDIA_LIBRARY.get().unwrap().read().unwrap().get_song_info(&current_song).unwrap().duration;
+        let duration = MEDIA_LIBRARY.get().unwrap().read().unwrap().get_song(&current_song).unwrap().duration;
         player.seek(duration.mul_f64(position));
     }
 }
@@ -266,4 +323,18 @@ pub fn set_volume(volume: f32) {
 pub fn get_queue() -> Vec<PlaylistEntry> {
     let player = PLAYER.lock().unwrap();
     player.queue.clone()
+}
+
+pub fn toggle_shuffle() {
+    let mut player = PLAYER.lock().unwrap();
+    player.shuffle_enabled = !player.shuffle_enabled;
+}
+
+pub fn cycle_loop_mode() {
+    let mut player = PLAYER.lock().unwrap();
+    match player.loop_mode {
+        LoopMode::None => player.loop_mode = LoopMode::Single,
+        LoopMode::Single => player.loop_mode = LoopMode::Queue,
+        LoopMode::Queue => player.loop_mode = LoopMode::None,
+    }
 }

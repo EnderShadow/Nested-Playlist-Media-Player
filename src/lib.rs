@@ -235,7 +235,7 @@ impl MediaLibrary {
         let songs: Vec<AudioSource> = serde_json::from_reader(library_file).map_err(|e| LoadSaveError::from(e).into_report().attach("Failed to parse library"))?;
         for song in songs {
             let path = song.path.clone();
-            // fallback to the metadata read from the library file if we cannot read the metadata from the file (eg. song doesn't exist on disk or is not of a compatible file type with the metadata parsing library)
+            // fallback to the metadata read from the library file if we cannot read the metadata from the file (e.g. song doesn't exist on disk or is not of a compatible file type with the metadata parsing library)
             let song = read_song_metadata(&path, song.uuid).unwrap_or_else(|| {
                 println!("Failed to read metadata for file {}: Using metadata stored in library", path);
                 song
@@ -433,7 +433,7 @@ impl MediaLibrary {
         self.songs.keys().cloned().collect()
     }
 
-    pub fn get_song_info(&self, uuid: &Uuid) -> Option<AudioSource> {
+    pub fn get_song(&self, uuid: &Uuid) -> Option<AudioSource> {
         self.songs.get(uuid).cloned()
     }
 
@@ -451,8 +451,11 @@ impl MediaLibrary {
     }
 
     pub fn get_playlist_contents(&self, uuid: Uuid) -> Option<Vec<PlaylistEntry>> {
-        let playlist = self.playlists.get(&uuid)?;
-        Some(playlist.contents.clone())
+        self.playlists.get(&uuid).map(|playlist| playlist.contents.clone())
+    }
+
+    pub fn get_playlist_length(&self, uuid: Uuid) -> Option<usize> {
+        self.playlists.get(&uuid).map(|playlist| playlist.flat_len(self))
     }
 
     pub fn refresh_song_metadata(&mut self, uuid: Uuid) -> Result<bool, Report<LibraryError>> {

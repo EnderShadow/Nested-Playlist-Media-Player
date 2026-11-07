@@ -1909,6 +1909,7 @@ dependencies = [
  "error-stack",
  "iced",
  "iced_aw",
+ "rand",
  "rodio",
  "serde",
  "serde_json",

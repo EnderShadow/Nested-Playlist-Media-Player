@@ -16,3 +16,4 @@ iced_aw = { version = "0.14.1", features = ["full"]}
 symphonia = { version = "0.6.1", features = ["all"] }
 rodio = { version = "0.23.0", features = ["symphonia-all"] }
 educe = "0.8.1"
+rand = "0.10.3"
