@@ -251,9 +251,13 @@ impl MediaLibrary {
     fn load_playlists(&mut self, playlist_dir: impl AsRef<Path>) -> Result<(), Report<LoadSaveError>> {
         let playlists: Vec<_> = playlist_dir.as_ref().read_dir().map_err(|e| LoadSaveError::from(e).into_report().attach("Could not read playlist directory"))?.filter_map(|playlist_file| {
             let file = playlist_file.ok()?;
-            let file = File::open(file.path()).ok()?;
-            let playlist: Option<Playlist> = serde_json::from_reader(file).ok();
-            playlist
+            if file.path().extension() == Some("json".as_ref()) {
+                let file = File::open(file.path()).ok()?;
+                let playlist: Option<Playlist> = serde_json::from_reader(file).ok();
+                playlist
+            } else {
+                None
+            }
         }).collect();
 
         playlists.into_iter().for_each(|playlist| {
