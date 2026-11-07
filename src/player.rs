@@ -83,28 +83,33 @@ impl Player {
         }
     }
 
-    fn next(&mut self) {
+    fn next(&mut self) -> bool{
         let index = self.current_index.map(|i| i + 1).unwrap_or(0);
         let song = self.walk_queue(index);
         if let Some((uuid, queue_state)) = song {
             self.current_song = Some(uuid);
             self.current_index = Some(index);
             self.queue_state = queue_state;
+            true
         } else {
             self.stop(true);
             self.current_song = None;
             self.current_index = None;
             self.queue_state.clear();
+            false
         }
     }
 
-    fn prev(&mut self) {
+    fn prev(&mut self) -> bool {
         let index = self.current_index.map(|i| i.saturating_sub(1)) .unwrap_or(0);
         let song = self.walk_queue(index);
         if let Some((uuid, queue_state)) = song {
             self.current_song = Some(uuid);
             self.current_index = Some(index);
             self.queue_state = queue_state;
+            true
+        } else {
+            false
         }
     }
 
@@ -164,8 +169,7 @@ fn song_ended(generation: u64) {
         return;
     }
     player.stop(true);
-    player.next();
-    if player.current_song.is_some() {
+    if player.next() {
         player.play();
     }
 }
@@ -174,7 +178,6 @@ pub fn play_song(audio: &AudioSource) {
     let mut player = PLAYER.lock().unwrap();
     player.stop(false);
     player.enqueue_song(audio);
-    player.next();
     player.play();
 }
 
@@ -187,7 +190,6 @@ pub fn play_playlist(playlist: &PlaylistInfo) {
     let mut player = PLAYER.lock().unwrap();
     player.stop(false);
     player.enqueue_playlist(playlist);
-    player.next();
     player.play();
 }
 
