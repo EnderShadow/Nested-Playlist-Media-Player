@@ -3,7 +3,7 @@ use educe::Educe;
 use crate::{MEDIA_LIBRARY};
 
 use iced::widget::{button, column, container, responsive, row, rule::horizontal as horizontal_rule, scrollable, slider, space, text};
-use iced::{Alignment, Background, Border, Color, Element, Length, Size, Subscription, Theme};
+use iced::{Alignment, Background, Border, Element, Length, Size, Subscription, Theme};
 use iced_aw::{ContextMenu, TabLabel, Tabs};
 use media_player::{AudioSource, PlaylistInfo};
 use uuid::Uuid;
@@ -126,6 +126,10 @@ impl UIState {
         }
 
         self.first_visible_playlist = clamp_first_visible_row(self.first_visible_playlist, self.playlists.len(), MIN_VISIBLE_TABLE_ROWS);
+    }
+
+    fn theme(&self) -> Theme {
+        Theme::Nord
     }
 
     fn subscription(&self) -> Subscription<UIMessage> {
@@ -391,21 +395,22 @@ fn visible_end(first_visible_row: usize, total_rows: usize, visible_rows: usize)
     first_visible_row.saturating_add(visible_rows).min(total_rows)
 }
 
-fn selected_table_row_style(_theme: &Theme, status: iced::widget::button::Status) -> iced::widget::button::Style {
+fn selected_table_row_style(theme: &Theme, status: button::Status) -> button::Style {
+    let palette = theme.extended_palette();
     let background_color = match status {
-        iced::widget::button::Status::Hovered => Color::from_rgb(0.18, 0.42, 0.75),
-        iced::widget::button::Status::Pressed => Color::from_rgb(0.12, 0.32, 0.62),
-        _ => Color::from_rgb(0.14, 0.36, 0.68),
+        button::Status::Hovered => palette.primary.strong.color,
+        button::Status::Pressed => palette.primary.strong.color,
+        _ => palette.primary.weak.color,
     };
 
-    iced::widget::button::Style {
+    button::Style {
         background: Some(Background::Color(background_color)),
-        text_color: Color::WHITE,
+        text_color: palette.primary.base.text,
         border: Border {
             radius: 4.0.into(),
             ..Border::default()
         },
-        ..iced::widget::button::Style::default()
+        ..button::Style::default()
     }
 }
 
@@ -423,5 +428,5 @@ fn format_duration(duration: Duration) -> String {
 }
 
 pub fn run_gui() -> iced::Result {
-    iced::application(UIState::new, UIState::update, UIState::view).subscription(UIState::subscription).run()
+    iced::application(UIState::new, UIState::update, UIState::view).theme(UIState::theme).subscription(UIState::subscription).run()
 }
