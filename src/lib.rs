@@ -400,6 +400,9 @@ impl MediaLibrary {
             if result.is_err() {
                 println!("Failed to delete playlist with uuid, name: {}, {}", uuid, playlist.name);
             }
+            self.save().unwrap_or_else(|_| {
+                println!("Failed to save library after deleting playlist");
+            });
 
             true
         } else {
@@ -438,7 +441,6 @@ impl MediaLibrary {
     pub fn remove_from_playlist(&mut self, idx: usize, playlist_uuid: Uuid) -> Result<PlaylistEntry, Report<LibraryError>> {
         if let Some(playlist) = self.playlists.get_mut(&playlist_uuid) {
             let entry = playlist.remove(idx);
-            playlist.mark_dirty();
             Ok(entry)
         } else {
             Err(Report::new(LibraryError::UnknownPlaylist(playlist_uuid)))

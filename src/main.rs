@@ -10,13 +10,13 @@ pub static MEDIA_LIBRARY: OnceLock<RwLock<MediaLibrary>> = OnceLock::new();
 fn main() {
     // If we can't find the user's base directories, we can't load the config.
     let base_dirs = directories::BaseDirs::new().expect("Could not find user's BaseDirs");
-    let mut config_dir = base_dirs.config_dir().to_path_buf();
-    config_dir.push("Media Player");
-    config_dir.push("config.json");
+    let mut config_path = base_dirs.config_dir().to_path_buf();
+    config_path.push("Media Player");
+    config_path.push("config.json");
 
-    let config_file = File::open(config_dir);
+    let config_file = File::open(config_path);
     let mut config = if let Ok(file) = config_file {
-        // If we can't parse the config file, we don't want to exit instead of loading a default config file
+        // If we can't parse the config file, we want to use a default config.
         serde_json::from_reader(file).unwrap_or_else(|_| {
             println!("Could not parse config file, using default config");
             Config::default()
@@ -40,7 +40,9 @@ fn main() {
         }
     };
 
-    library.save().unwrap();
+    library.save().unwrap_or_else(|_| {
+        println!("Failed to save library after loading");
+    });
 
     // MEDIA_LIBRARY is guaranteed to be uninitialized here, so this will never fail.
     MEDIA_LIBRARY.set(RwLock::new(library)).ok().unwrap();

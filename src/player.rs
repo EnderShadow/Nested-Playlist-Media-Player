@@ -93,6 +93,9 @@ impl Player {
                                 self.player.append(rodio::source::EmptyCallback::new(Box::new(move || {
                                     std::thread::spawn(move || song_ended(generation));
                                 })));
+                                if self.player.is_paused() {
+                                    self.player.play();
+                                }
                                 self.player_state = PlayerState::Playing;
                             }
                         }
@@ -194,16 +197,10 @@ impl Player {
                         }
                     }
                     PlaylistEntry::Playlist(uuid) => {
-                        let playlist_contents = MEDIA_LIBRARY.get().unwrap().read().unwrap().get_playlist_contents(uuid);
-                        if let Some(playlist_contents) = playlist_contents {
-                            iter_stack.push(current_iter);
-                            current_iter = playlist_contents.into_iter();
-                            queue_stack.push(0);
-                        } else {
-                            current_index += 1;
-                            let last = queue_stack.pop().unwrap();
-                            queue_stack.push(last + 1);
-                        }
+                        let playlist_contents = MEDIA_LIBRARY.get().unwrap().read().unwrap().get_playlist_contents(uuid).unwrap_or(Vec::new());
+                        iter_stack.push(current_iter);
+                        current_iter = playlist_contents.into_iter();
+                        queue_stack.push(0);
                     }
                 }
             } else if !iter_stack.is_empty() {
@@ -334,8 +331,8 @@ pub fn song_progress() -> Duration {
 
 pub fn seek(position: f64) {
     let mut player = PLAYER.lock().unwrap();
-    if let Some(current_song) = player.current_song {
-        let duration = MEDIA_LIBRARY.get().unwrap().read().unwrap().get_song(&current_song).unwrap().duration;
+    if let Some(current_song) = player.current_song && let Some(song) = MEDIA_LIBRARY.get().unwrap().read().unwrap().get_song(&current_song){
+        let duration = song.duration;
         player.seek(duration.mul_f64(position));
     }
 }

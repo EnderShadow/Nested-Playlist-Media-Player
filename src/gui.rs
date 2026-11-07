@@ -275,7 +275,7 @@ impl UIState {
                     table_cell(song.title.clone(), 3),
                     table_cell(song.artist.as_deref().unwrap_or("Unknown artist"), 2),
                     table_cell(song.album.as_deref().unwrap_or("Unknown album"), 2),
-                    table_cell(format_duration(song.duration), 1),
+                    table_cell(format_duration(Some(song.duration)), 1),
                 ].spacing(8).padding(8).height(Length::Fixed(TABLE_ROW_HEIGHT)).align_y(Alignment::Center);
 
                 let row_button = button(row).width(Length::Fill).height(Length::Fixed(TABLE_ROW_HEIGHT)).on_press(UIMessage::SelectSong(Some(index)));
@@ -367,7 +367,7 @@ impl UIState {
         let current_song_title = self.current_song.and_then(|uuid| self.songs.iter().find(|song| song.uuid == uuid)).map(|song| song.title.as_str()).unwrap_or("No song selected");
 
         let progress_text = if self.player_state != MediaPlayerState::Stopped && self.current_song_duration != Duration::MAX {
-            format!("{} / {}", format_duration(self.current_song_duration.mul_f64(self.song_progress / SONG_PROGRESS_DIVISIONS)), format_duration(self.current_song_duration))
+            format!("{} / {}", format_duration(Some(self.current_song_duration.mul_f64(self.song_progress / SONG_PROGRESS_DIVISIONS))), format_duration(Some(self.current_song_duration)))
         } else {
             "-:-- / -:--".to_string()
         };
@@ -455,12 +455,16 @@ fn table_cell<'a>(content: impl Into<String>, width_portion: u16) -> Element<'a,
     container(text(content.into())).width(Length::FillPortion(width_portion)).into()
 }
 
-fn format_duration(duration: Duration) -> String {
-    let total_seconds = duration.as_secs();
-    let minutes = total_seconds / 60;
-    let seconds = total_seconds % 60;
+fn format_duration(duration: Option<Duration>) -> String {
+    if let Some(duration) = duration {
+        let total_seconds = duration.as_secs();
+        let minutes = total_seconds / 60;
+        let seconds = total_seconds % 60;
 
-    format!("{minutes}:{seconds:02}")
+        format!("{minutes}:{seconds:02}")
+    } else {
+        "-:--".to_string()
+    }
 }
 
 pub fn run_gui() -> iced::Result {
