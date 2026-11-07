@@ -7,6 +7,11 @@ use std::fs::File;
 use std::io::Write;
 use std::path::Path;
 use std::time::Duration;
+use symphonia::core::formats::{FormatOptions, TrackType};
+use symphonia::core::formats::probe::Hint;
+use symphonia::core::io::MediaSourceStream;
+use symphonia::core::meta::{MetadataOptions, StandardTag};
+use symphonia::default::get_probe;
 use thiserror::Error;
 use uuid::Uuid;
 
@@ -465,20 +470,63 @@ impl MediaLibrary {
 }
 
 fn read_song_metadata(path: impl AsRef<Path> + ToString, uuid: Uuid) -> Option<AudioSource> {
-    let tag = ratag::tag::Basic::from_file(&path).ok()?;
-    let title = if let Some(title) = &tag.title { title.to_string() } else { path.as_ref().file_name()?.to_str()?.to_string() };
+    let file = File::open(&path).ok()?;
+    let mss = MediaSourceStream::new(Box::new(file), Default::default());
+    let mut hint = Hint::new();
+    if let Some(ext) = path.as_ref().extension().and_then(|x| x.to_str()) {
+        hint.with_extension(ext);
+    }
+    let mut format = get_probe().probe(&hint, mss, FormatOptions::default(), MetadataOptions::default()).ok()?;
+    let mut metadata = format.metadata();
+
+    let mut title = String::new();
+    let mut artist = None;
+    let mut album = None;
+    let mut genre = None;
+    let mut album_artist = None;
+    let mut track_number = None;
+    let mut track_count = None;
+    let mut year = None;
+
+    while let Some(meta) = metadata.pop() {
+        for tag in meta.media.tags {
+            match tag.std {
+                Some(StandardTag::TrackTitle(meta_title)) => title = meta_title.to_string(),
+                Some(StandardTag::Artist(meta_artist)) => artist = Some(meta_artist.to_string()),
+                Some(StandardTag::Album(meta_album)) => album = Some(meta_album.to_string()),
+                Some(StandardTag::Genre(meta_genre)) => genre = Some(meta_genre.to_string()),
+                Some(StandardTag::AlbumArtist(meta_album_artist)) => album_artist = Some(meta_album_artist.to_string()),
+                Some(StandardTag::TrackNumber(meta_track_number)) => track_number = Some(meta_track_number as u32),
+                Some(StandardTag::TrackTotal(meta_track_total)) => track_count = Some(meta_track_total as u32),
+                Some(StandardTag::ReleaseYear(meta_year)) => year = Some(meta_year.to_string()),
+                _ => (),
+            }
+        }
+    }
+
+    let track = format.default_track(TrackType::Audio)?;
+    let duration = if let Some(time_base) = track.time_base && let Some(duration) = track.duration {
+        time_base.calc_duration(duration).map(|t| Duration::from_nanos_u128(t.as_nanos() as u128)).unwrap_or(Duration::ZERO)
+    } else {
+        Duration::ZERO
+    };
+
+    if title.is_empty() {
+        title = path.as_ref().file_name()?.to_string_lossy().to_string();
+    }
+
     Some(AudioSource {
         uuid,
         path: path.to_string(),
         title,
-        artist: tag.artists.first().cloned(),
-        album: tag.album.clone(),
-        genre: tag.genres.first().cloned(),
-        album_artist: tag.album_artist.clone(),
-        track_number: tag.track,
-        track_count: tag.get_track_count(),
-        year: tag.year.map(|x| format!("{}", x)),
-        duration: tag.length.unwrap_or(Duration::ZERO),
+        artist,
+        album,
+        genre,
+        album_artist,
+        track_number,
+        track_count,
+        year,
+        duration,
     })
 }
 
