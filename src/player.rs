@@ -19,7 +19,7 @@ static PLAYER: LazyLock<Mutex<Player>> = LazyLock::new(|| Mutex::new(Player {
     player: rodio::Player::connect_new(AUDIO_SINK_HANDLE.mixer())
 }));
 
-#[derive(Copy, Clone)]
+#[derive(Copy, Clone, Eq, PartialEq)]
 pub enum PlayerState {
     Stopped,
     Playing,
@@ -36,13 +36,15 @@ struct Player {
 }
 
 impl Player {
-    fn stop(&mut self) {
+    fn stop(&mut self, preserve_queue: bool) {
         self.player.stop();
         self.player_state = PlayerState::Stopped;
-        self.current_song = None;
-        self.current_index = None;
-        self.queue.clear();
-        self.queue_state.clear();
+        if !preserve_queue {
+            self.current_song = None;
+            self.current_index = None;
+            self.queue.clear();
+            self.queue_state.clear();
+        }
     }
 
     fn enqueue_song(&mut self, audio: &AudioSource) {
@@ -56,7 +58,6 @@ impl Player {
     fn play(&mut self) {
         match self.player_state {
             PlayerState::Stopped => {
-                self.next();
                 if let Some(current_song) = &self.current_song {
                     let song_path = MEDIA_LIBRARY.get().unwrap().read().unwrap().get_song_info(current_song).map(|x| x.path).unwrap();
                     let file = File::open(song_path).unwrap();
@@ -79,6 +80,11 @@ impl Player {
             self.current_song = Some(uuid);
             self.current_index = Some(index);
             self.queue_state = queue_state;
+        } else {
+            self.stop(true);
+            self.current_song = None;
+            self.current_index = None;
+            self.queue_state.clear();
         }
     }
 
@@ -135,15 +141,18 @@ impl Player {
     }
 
     fn pause(&mut self) {
-        self.player.pause();
-        self.player_state = PlayerState::Paused;
+        if self.player_state == PlayerState::Playing {
+            self.player.pause();
+            self.player_state = PlayerState::Paused;
+        }
     }
 }
 
 pub fn play_song(audio: &AudioSource) {
     let mut player = PLAYER.lock().unwrap();
-    player.stop();
+    player.stop(false);
     player.enqueue_song(audio);
+    player.next();
     player.play();
 }
 
@@ -154,8 +163,9 @@ pub fn enqueue_song(audio: &AudioSource) {
 
 pub fn play_playlist(playlist: &Playlist) {
     let mut player = PLAYER.lock().unwrap();
-    player.stop();
+    player.stop(false);
     player.enqueue_playlist(playlist);
+    player.next();
     player.play();
 }
 
@@ -166,7 +176,7 @@ pub fn enqueue_playlist(playlist: &Playlist) {
 
 pub fn stop_player() {
     let mut player = PLAYER.lock().unwrap();
-    player.stop();
+    player.stop(false);
 }
 
 pub fn pause_player() {
@@ -177,6 +187,28 @@ pub fn pause_player() {
 pub fn resume_player() {
     let mut player = PLAYER.lock().unwrap();
     player.play();
+}
+
+pub fn next_song() {
+    let mut player = PLAYER.lock().unwrap();
+    let paused = player.player_state == PlayerState::Paused;
+    player.stop(true);
+    player.next();
+    player.play();
+    if paused {
+        player.pause();
+    }
+}
+
+pub fn previous_song() {
+    let mut player = PLAYER.lock().unwrap();
+    let paused = player.player_state == PlayerState::Paused;
+    player.stop(true);
+    player.prev();
+    player.play();
+    if paused {
+        player.pause();
+    }
 }
 
 pub fn current_song() -> Option<Uuid> {
@@ -200,4 +232,9 @@ pub fn seek(position: f64) {
         let duration = MEDIA_LIBRARY.get().unwrap().read().unwrap().get_song_info(&current_song).unwrap().duration;
         player.seek(duration.mul_f64(position));
     }
+}
+
+pub fn set_volume(volume: f32) {
+    let player = PLAYER.lock().unwrap();
+    player.player.set_volume(volume);
 }

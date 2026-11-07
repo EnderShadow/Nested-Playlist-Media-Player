@@ -1,11 +1,11 @@
 use std::time::Duration;
-use crate::{player, MEDIA_LIBRARY};
+use crate::{MEDIA_LIBRARY};
 
 use iced::widget::{button, column, container, responsive, row, rule::horizontal as horizontal_rule, scrollable, slider, space, text};
 use iced::{Alignment, Background, Border, Color, Element, Length, Size, Subscription, Theme};
 use media_player::{AudioSource, PlaylistInfo};
 use uuid::Uuid;
-use crate::player::{current_song, PlayerState, player_state, play_song, resume_player, pause_player, song_progress, seek};
+use crate::player::{current_song, PlayerState, player_state, play_song, resume_player, pause_player, song_progress, seek, set_volume, previous_song, next_song, enqueue_song};
 
 const TABLE_ROW_HEIGHT: f32 = 42.0;
 const TABLE_HEADER_HEIGHT: f32 = 42.0;
@@ -24,6 +24,7 @@ struct UIState {
     current_song: Option<Uuid>,
     current_song_duration: Duration,
     song_progress: f64,
+    volume: f32,
 }
 
 #[derive(Debug, Default, Copy, Clone, Eq, PartialEq)]
@@ -69,6 +70,7 @@ pub enum UIMessage {
     NextSong,
     PreviousSong,
     ProgressChanged(f64),
+    VolumeChanged(f32),
     Tick,
 }
 
@@ -86,6 +88,7 @@ impl Default for UIState {
             current_song: Default::default(),
             current_song_duration: Duration::MAX,
             song_progress: Default::default(),
+            volume: 100.0,
         }
     }
 }
@@ -159,7 +162,11 @@ impl UIState {
                 if self.selected_song != selected_song {
                     self.selected_song = selected_song;
                 } else if let Some(index) = selected_song && let Some(song) = self.songs.get(index) {
-                    play_song(song);
+                    if self.player_state == MediaPlayerState::Playing {
+                        enqueue_song(song);
+                    } else {
+                        play_song(song);
+                    }
                 }
             }
             UIMessage::SelectPlaylist(selected_playlist) => {
@@ -191,13 +198,21 @@ impl UIState {
                 pause_player();
             }
             UIMessage::NextSong => {
-                self.select_relative_song(1);
+                next_song()
             }
             UIMessage::PreviousSong => {
-                self.select_relative_song(-1);
+                if self.current_song_duration.mul_f64(self.song_progress / SONG_PROGRESS_DIVISIONS) > Duration::from_secs(5) {
+                    seek(0.0);
+                } else {
+                    previous_song();
+                }
             }
             UIMessage::ProgressChanged(progress) => {
                 seek(progress / SONG_PROGRESS_DIVISIONS);
+            }
+            UIMessage::VolumeChanged(volume) => {
+                self.volume = volume;
+                set_volume(volume / 100.0);
             }
             UIMessage::Tick => {
                 self.player_state = MediaPlayerState::from(player_state());
@@ -315,31 +330,8 @@ impl UIState {
         column![
             row![text(current_song_title).size(18), space().width(Length::Fill), text(progress_text),].align_y(Alignment::Center),
             slider(0.0..=SONG_PROGRESS_DIVISIONS, self.song_progress, UIMessage::ProgressChanged),
-            row![button("Previous").on_press(UIMessage::PreviousSong), play_pause_button, button("Next").on_press(UIMessage::NextSong),].spacing(8).align_y(Alignment::Center),
+            row![button("Previous").on_press(UIMessage::PreviousSong), play_pause_button, button("Next").on_press(UIMessage::NextSong), space().width(Length::FillPortion(8)), slider(0.0..=100.0, self.volume, UIMessage::VolumeChanged).width(Length::FillPortion(2))].spacing(8).align_y(Alignment::Center),
         ].spacing(8).into()
-    }
-
-    fn select_relative_song(&mut self, offset: isize) {
-        if self.songs.is_empty() {
-            self.selected_song = None;
-            self.current_song = None;
-            self.player_state = MediaPlayerState::Stopped;
-            self.song_progress = 0.0;
-            return;
-        }
-
-        let current_index = self.current_song.and_then(|uuid| self.songs.iter().position(|song| song.uuid == uuid)).or(self.selected_song).unwrap_or(0);
-
-        let next_index = if offset.is_negative() {
-            current_index.checked_sub(offset.unsigned_abs()).unwrap_or(self.songs.len() - 1)
-        } else {
-            (current_index + offset as usize) % self.songs.len()
-        };
-
-        self.selected_song = Some(next_index);
-        self.current_song = Some(self.songs[next_index].uuid);
-        self.first_visible_song = first_visible_row_for_selection(next_index, self.first_visible_song, self.songs.len(), MIN_VISIBLE_TABLE_ROWS);
-        self.song_progress = 0.0;
     }
 }
 
@@ -365,18 +357,6 @@ fn first_visible_row_from_scroll_offset(scroll_offset: f32, total_rows: usize, v
 
 fn visible_end(first_visible_row: usize, total_rows: usize, visible_rows: usize) -> usize {
     first_visible_row.saturating_add(visible_rows).min(total_rows)
-}
-
-fn first_visible_row_for_selection(selected_index: usize, current_first_visible_row: usize, total_rows: usize, visible_rows: usize) -> usize {
-    let current_end = visible_end(current_first_visible_row, total_rows, visible_rows);
-
-    if selected_index < current_first_visible_row {
-        selected_index
-    } else if selected_index >= current_end {
-        selected_index.saturating_add(1).saturating_sub(visible_rows).min(max_first_visible_row(total_rows, visible_rows))
-    } else {
-        current_first_visible_row
-    }
 }
 
 fn selected_table_row_style(_theme: &Theme, status: iced::widget::button::Status) -> iced::widget::button::Style {
