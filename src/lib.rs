@@ -1,5 +1,4 @@
 use error_stack::{IntoReport, Report};
-use ratag::TagRetrieve;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;

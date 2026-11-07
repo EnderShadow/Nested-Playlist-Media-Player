@@ -1,7 +1,6 @@
 use std::fs::File;
 use std::sync::{LazyLock, Mutex};
 use std::time::Duration;
-use iced::futures::AsyncSeekExt;
 use rodio::MixerDeviceSink;
 use uuid::Uuid;
 use media_player::{AudioSource, Playlist, PlaylistEntry};
