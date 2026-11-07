@@ -3,7 +3,7 @@ use std::sync::{LazyLock, Mutex};
 use std::time::Duration;
 use rodio::MixerDeviceSink;
 use uuid::Uuid;
-use media_player::{AudioSource, Playlist, PlaylistEntry};
+use media_player::{AudioSource, PlaylistEntry, PlaylistInfo};
 use crate::MEDIA_LIBRARY;
 
 static AUDIO_SINK_HANDLE: LazyLock<MixerDeviceSink> = LazyLock::new(|| {
@@ -51,13 +51,16 @@ impl Player {
         self.queue.push(PlaylistEntry::Song(audio.uuid));
     }
 
-    fn enqueue_playlist(&mut self, playlist: &Playlist) {
+    fn enqueue_playlist(&mut self, playlist: &PlaylistInfo) {
         self.queue.push(PlaylistEntry::Playlist(playlist.uuid))
     }
 
     fn play(&mut self) {
         match self.player_state {
             PlayerState::Stopped => {
+                if self.current_song.is_none() {
+                    self.next();
+                }
                 if let Some(current_song) = &self.current_song {
                     let song_path = MEDIA_LIBRARY.get().unwrap().read().unwrap().get_song_info(current_song).map(|x| x.path).unwrap();
                     let file = File::open(song_path).unwrap();
@@ -161,7 +164,7 @@ pub fn enqueue_song(audio: &AudioSource) {
     player.enqueue_song(audio);
 }
 
-pub fn play_playlist(playlist: &Playlist) {
+pub fn play_playlist(playlist: &PlaylistInfo) {
     let mut player = PLAYER.lock().unwrap();
     player.stop(false);
     player.enqueue_playlist(playlist);
@@ -169,7 +172,7 @@ pub fn play_playlist(playlist: &Playlist) {
     player.play();
 }
 
-pub fn enqueue_playlist(playlist: &Playlist) {
+pub fn enqueue_playlist(playlist: &PlaylistInfo) {
     let mut player = PLAYER.lock().unwrap();
     player.enqueue_playlist(playlist);
 }
@@ -237,4 +240,9 @@ pub fn seek(position: f64) {
 pub fn set_volume(volume: f32) {
     let player = PLAYER.lock().unwrap();
     player.player.set_volume(volume);
+}
+
+pub fn get_queue() -> Vec<PlaylistEntry> {
+    let player = PLAYER.lock().unwrap();
+    player.queue.clone()
 }

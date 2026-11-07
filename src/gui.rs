@@ -1,17 +1,21 @@
-use std::time::Duration;
+use std::time::{Duration, Instant};
+use educe::Educe;
 use crate::{MEDIA_LIBRARY};
 
 use iced::widget::{button, column, container, responsive, row, rule::horizontal as horizontal_rule, scrollable, slider, space, text};
 use iced::{Alignment, Background, Border, Color, Element, Length, Size, Subscription, Theme};
+use iced_aw::ContextMenu;
 use media_player::{AudioSource, PlaylistInfo};
 use uuid::Uuid;
-use crate::player::{current_song, PlayerState, player_state, play_song, resume_player, pause_player, song_progress, seek, set_volume, previous_song, next_song, enqueue_song};
+use crate::player::{current_song, PlayerState, player_state, play_song, resume_player, pause_player, song_progress, seek, set_volume, previous_song, next_song, enqueue_song, play_playlist, enqueue_playlist};
 
 const TABLE_ROW_HEIGHT: f32 = 42.0;
 const TABLE_HEADER_HEIGHT: f32 = 42.0;
 const MIN_VISIBLE_TABLE_ROWS: usize = 1;
 const SONG_PROGRESS_DIVISIONS: f64 = 10000.0;
 
+#[derive(Educe)]
+#[educe(Default)]
 struct UIState {
     selected_tab: MediaPlayerTab,
     songs: Vec<AudioSource>,
@@ -22,9 +26,13 @@ struct UIState {
     first_visible_playlist: usize,
     player_state: MediaPlayerState,
     current_song: Option<Uuid>,
+    #[educe(Default(expression = Duration::MAX))]
     current_song_duration: Duration,
     song_progress: f64,
+    #[educe(Default(expression = 100.0))]
     volume: f32,
+    #[educe(Default(expression = Instant::now()))]
+    last_click_time: Instant,
 }
 
 #[derive(Debug, Default, Copy, Clone, Eq, PartialEq)]
@@ -72,25 +80,10 @@ pub enum UIMessage {
     ProgressChanged(f64),
     VolumeChanged(f32),
     Tick,
-}
-
-impl Default for UIState {
-    fn default() -> Self {
-        Self {
-            selected_tab: Default::default(),
-            songs: Default::default(),
-            selected_song: Default::default(),
-            first_visible_song: Default::default(),
-            playlists: Default::default(),
-            selected_playlist: Default::default(),
-            first_visible_playlist: Default::default(),
-            player_state: Default::default(),
-            current_song: Default::default(),
-            current_song_duration: Duration::MAX,
-            song_progress: Default::default(),
-            volume: 100.0,
-        }
-    }
+    PlaySong(usize),
+    EnqueueSong(usize),
+    PlayPlaylist(usize),
+    EnqueuePlaylist(usize),
 }
 
 impl UIState {
@@ -140,6 +133,7 @@ impl UIState {
     }
 
     pub fn view(&self) -> Element<'_, UIMessage> {
+
         let tabs = row![
             tab_button("Songs", MediaPlayerTab::Songs, self.selected_tab == MediaPlayerTab::Songs,),
             tab_button("Playlists", MediaPlayerTab::Playlists, self.selected_tab == MediaPlayerTab::Playlists,),
@@ -159,22 +153,26 @@ impl UIState {
                 self.selected_tab = selected_tab;
             }
             UIMessage::SelectSong(selected_song) => {
+                let click_time = Instant::now();
                 if self.selected_song != selected_song {
                     self.selected_song = selected_song;
-                } else if let Some(index) = selected_song && let Some(song) = self.songs.get(index) {
+                } else if let Some(index) = selected_song && click_time.duration_since(self.last_click_time) < Duration::from_millis(1000) && let Some(song) = self.songs.get(index) {
                     if self.player_state == MediaPlayerState::Playing {
                         enqueue_song(song);
                     } else {
                         play_song(song);
                     }
                 }
+                self.last_click_time = click_time;
             }
             UIMessage::SelectPlaylist(selected_playlist) => {
+                let click_time = Instant::now();
                 if self.selected_playlist != selected_playlist {
                     self.selected_playlist = selected_playlist;
-                } else {
+                } else if let Some(index) = selected_playlist && click_time.duration_since(self.last_click_time) < Duration::from_millis(1000) && let Some(playlist) = self.playlists.get(index) {
                     // TODO: Open playlist
                 }
+                self.last_click_time = click_time;
             }
             UIMessage::ScrollSongs(first_visible_song) => {
                 self.first_visible_song = first_visible_song;
@@ -183,16 +181,7 @@ impl UIState {
                 self.first_visible_playlist = first_visible_playlist;
             }
             UIMessage::Play => {
-                if self.current_song.is_none() {
-                    if let Some(index) = self.selected_song {
-                        let song = self.songs.get(index).unwrap();
-                        play_song(song);
-                    } else if let Some(first_song) = self.songs.first() {
-                        play_song(first_song);
-                    }
-                } else {
-                    resume_player();
-                }
+                resume_player();
             }
             UIMessage::Pause => {
                 pause_player();
@@ -219,6 +208,26 @@ impl UIState {
                 self.current_song = current_song();
                 self.current_song_duration = self.current_song.map(|uuid| MEDIA_LIBRARY.get().unwrap().read().unwrap().get_song_info(&uuid).map(|audio| audio.duration).unwrap_or(Duration::MAX)).unwrap_or(Duration::MAX);
                 self.song_progress = SONG_PROGRESS_DIVISIONS * song_progress().as_secs_f64() / self.current_song_duration.as_secs_f64();
+            }
+            UIMessage::PlaySong(index) => {
+                if let Some(song) = self.songs.get(index) {
+                    play_song(song);
+                }
+            }
+            UIMessage::EnqueueSong(index) => {
+                if let Some(song) = self.songs.get(index) {
+                    enqueue_song(song);
+                }
+            }
+            UIMessage::PlayPlaylist(index) => {
+                if let Some(playlist) = self.playlists.get(index) {
+                    play_playlist(&playlist.info);
+                }
+            }
+            UIMessage::EnqueuePlaylist(index) => {
+                if let Some(playlist) = self.playlists.get(index) {
+                    enqueue_playlist(&playlist.info);
+                }
             }
         }
     }
@@ -251,13 +260,22 @@ impl UIState {
 
                 let row_button = button(row).width(Length::Fill).height(Length::Fixed(TABLE_ROW_HEIGHT)).on_press(UIMessage::SelectSong(Some(index)));
 
-                let button = if selected {
+                let row_button = if selected {
                     row_button.style(selected_table_row_style)
                 } else {
                     row_button
                 };
 
-                rows.push(button)
+                // TODO: add the following menu items: add to playlist, delete, edit metadata (optional)
+                let button_with_menu = ContextMenu::new(row_button, move || {
+                    container(
+                    column![
+                        button("Play").on_press(UIMessage::PlaySong(index)),
+                        button("Add to queue").on_press(UIMessage::EnqueueSong(index))
+                    ].spacing(4)).padding(6).style(container::bordered_box).into()
+                });
+
+                rows.push(button_with_menu)
             }).push(space().height(Length::Fixed(bottom_spacer_height)));
 
         column![
@@ -302,7 +320,16 @@ impl UIState {
                     row_button
                 };
 
-                rows.push(row_button)
+                // TODO: add the following menu items: open playlist, add to playlist, delete, edit metadata (optional)
+                let button_with_menu = ContextMenu::new(row_button, move || {
+                    container(
+                        column![
+                        button("Play").on_press(UIMessage::PlayPlaylist(index)),
+                        button("Add to queue").on_press(UIMessage::EnqueuePlaylist(index))
+                    ].spacing(4)).padding(6).style(container::bordered_box).into()
+                });
+
+                rows.push(button_with_menu)
             }).push(space().height(Length::Fixed(bottom_spacer_height)));
 
         column![
