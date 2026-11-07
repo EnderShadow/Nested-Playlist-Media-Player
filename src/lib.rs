@@ -76,9 +76,9 @@ pub struct Playlist {
 }
 
 impl Playlist {
-    pub fn new(name: String, description: String) -> Self {
+    pub fn new(uuid: Uuid, name: String, description: String) -> Self {
         Playlist {
-            uuid: Uuid::new_v4(),
+            uuid,
             name,
             description,
             contents: Vec::new(),
@@ -151,19 +151,21 @@ pub struct MediaLibrary {
     songs: HashMap<Uuid, AudioSource>,
     playlists: HashMap<Uuid, Playlist>,
     dirty: bool,
+    config: Config,
 }
 
 impl MediaLibrary {
-    fn new() -> Self {
+    fn new(config: Config) -> Self {
         MediaLibrary {
             songs: HashMap::new(),
             playlists: HashMap::new(),
             dirty: false,
+            config
         }
     }
 
-    pub fn save(&mut self, config: &Config) -> Result<(), Report<LoadSaveError>> {
-        let data_dir = Path::new(&config.data_directory);
+    pub fn save(&mut self) -> Result<(), Report<LoadSaveError>> {
+        let data_dir = Path::new(&self.config.data_directory);
         if !data_dir.exists() {
             fs::create_dir_all(data_dir).map_err(|e| LoadSaveError::from(e).into_report().attach("Failed to create data directory"))?;
         }
@@ -185,7 +187,7 @@ impl MediaLibrary {
         }
 
         for playlist in self.playlists.values_mut().filter(|p| p.dirty) {
-            let playlist_file = playlist_dir.join(&playlist.name).with_added_extension("json");
+            let playlist_file = playlist_dir.join(playlist.uuid.to_string()).with_added_extension("json");
             let temp_file = playlist_file.with_added_extension("new");
             let mut file = File::create(&temp_file).map_err(|e| LoadSaveError::from(e).into_report().attach("Failed to create playlist file"))?;
             let data = serde_json::to_string(&playlist).map_err(|e| LoadSaveError::from(e).into_report().attach("Failed to serialize playlist file"))?;
@@ -197,10 +199,10 @@ impl MediaLibrary {
         Ok(())
     }
 
-    pub fn load(config: &Config) -> Result<Self, Report<LoadSaveError>> {
-        let mut library = Self::new();
+    pub fn load(config: Config) -> Result<Self, Report<LoadSaveError>> {
+        let mut library = Self::new(config);
 
-        let data_dir = Path::new(&config.data_directory);
+        let data_dir = Path::new(&library.config.data_directory);
         if !data_dir.exists() {
             fs::create_dir_all(data_dir).map_err(|e| LoadSaveError::from(e).into_report().attach("Failed to create data directory"))?;
         }
@@ -248,11 +250,11 @@ impl MediaLibrary {
 
     fn load_playlists(&mut self, playlist_dir: impl AsRef<Path>) -> Result<(), Report<LoadSaveError>> {
         let playlists: Vec<_> = playlist_dir.as_ref().read_dir().map_err(|e| LoadSaveError::from(e).into_report().attach("Could not read playlist directory"))?.filter_map(|playlist_file| {
-                let file = playlist_file.ok()?;
-                let file = File::open(file.path()).ok()?;
-                let playlist: Option<Playlist> = serde_json::from_reader(file).ok();
-                playlist
-            }).collect();
+            let file = playlist_file.ok()?;
+            let file = File::open(file.path()).ok()?;
+            let playlist: Option<Playlist> = serde_json::from_reader(file).ok();
+            playlist
+        }).collect();
 
         playlists.into_iter().for_each(|playlist| {
             self.playlists.insert(playlist.uuid, playlist);
@@ -321,7 +323,12 @@ impl MediaLibrary {
     }
 
     pub fn add_song(&mut self, path: String) -> Uuid {
-        let uuid = Uuid::new_v4();
+        let uuid = loop {
+            let uuid = Uuid::new_v4();
+            if !self.songs.contains_key(&uuid) {
+                break uuid;
+            }
+        };
         let song = if let Some(song) = read_song_metadata(&path, uuid) {
             song
         } else {
@@ -364,8 +371,13 @@ impl MediaLibrary {
     }
 
     pub fn create_playlist(&mut self, name: String, description: String) -> Uuid {
-        let playlist = Playlist::new(name, description);
-        let uuid = playlist.uuid;
+        let uuid = loop {
+            let uuid = Uuid::new_v4();
+            if !self.playlists.contains_key(&uuid) {
+                break uuid;
+            }
+        };
+        let playlist = Playlist::new(uuid, name, description);
         self.playlists.insert(uuid, playlist);
         uuid
     }
@@ -378,6 +390,12 @@ impl MediaLibrary {
                 playlist.remove_all(uuid);
                 playlist.mark_dirty();
             });
+
+            let playlist_file = Path::new(&self.config.data_directory).join("playlists").join(format!("{}.json", uuid));
+            let result = fs::remove_file(playlist_file);
+            if result.is_err() {
+                println!("Failed to delete playlist with uuid, name: {}, {}", uuid, playlist.name);
+            }
 
             true
         } else {

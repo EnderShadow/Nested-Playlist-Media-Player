@@ -30,7 +30,7 @@ fn main() {
         config.data_directory = data_dir.to_str().expect("Could not parse data directory as a string").to_owned();
     }
 
-    let library = MediaLibrary::load(&config);
+    let library = MediaLibrary::load(config);
     let mut library = match library {
         Ok(library) => library,
         Err(error) => {
@@ -38,7 +38,7 @@ fn main() {
         }
     };
 
-    library.save(&config).unwrap();
+    library.save().unwrap();
 
     // MEDIA_LIBRARY is guaranteed to be uninitialized here, so this will never fail.
     MEDIA_LIBRARY.set(RwLock::new(library)).ok().unwrap();
