@@ -40,6 +40,7 @@ impl Player {
         self.player.stop();
         self.player_state = PlayerState::Stopped;
         self.current_song = None;
+        self.current_index = None;
         self.queue.clear();
         self.queue_state.clear();
     }
@@ -72,7 +73,7 @@ impl Player {
     }
 
     fn next(&mut self) {
-        let index = self.current_index.map(|i| i + 1) .unwrap_or(0);
+        let index = self.current_index.map(|i| i + 1).unwrap_or(0);
         let song = self.walk_queue(index);
         if let Some((uuid, queue_state)) = song {
             self.current_song = Some(uuid);
