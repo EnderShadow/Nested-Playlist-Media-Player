@@ -505,6 +505,22 @@ fn read_song_metadata(path: impl AsRef<Path> + ToString, uuid: Uuid) -> Option<A
             }
         }
     }
+    // pop never removes the last metadata element, so after popping there will be one metadata element left that needs to be read unless there was no metadata in the first place.
+    if let Some(meta) = metadata.current() {
+        for tag in &meta.media.tags {
+            match &tag.std {
+                Some(StandardTag::TrackTitle(meta_title)) => title = meta_title.to_string(),
+                Some(StandardTag::Artist(meta_artist)) => artist = Some(meta_artist.to_string()),
+                Some(StandardTag::Album(meta_album)) => album = Some(meta_album.to_string()),
+                Some(StandardTag::Genre(meta_genre)) => genre = Some(meta_genre.to_string()),
+                Some(StandardTag::AlbumArtist(meta_album_artist)) => album_artist = Some(meta_album_artist.to_string()),
+                Some(StandardTag::TrackNumber(meta_track_number)) => track_number = Some(*meta_track_number as u32),
+                Some(StandardTag::TrackTotal(meta_track_total)) => track_count = Some(*meta_track_total as u32),
+                Some(StandardTag::ReleaseYear(meta_year)) => year = Some(meta_year.to_string()),
+                _ => (),
+            }
+        }
+    }
 
     let track = format.default_track(TrackType::Audio)?;
     let duration = if let Some(time_base) = track.time_base && let Some(duration) = track.duration {
