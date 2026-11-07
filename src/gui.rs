@@ -1,16 +1,17 @@
+use std::time::Duration;
 use crate::{player, MEDIA_LIBRARY};
 
 use iced::widget::{button, column, container, responsive, row, rule::horizontal as horizontal_rule, scrollable, slider, space, text};
-use iced::{Alignment, Background, Border, Color, Element, Length, Size, Theme};
+use iced::{Alignment, Background, Border, Color, Element, Length, Size, Subscription, Theme};
 use media_player::{AudioSource, PlaylistInfo};
 use uuid::Uuid;
-use crate::player::{current_song, PlayerState, player_state, play_song, resume_player, pause_player, song_progress};
+use crate::player::{current_song, PlayerState, player_state, play_song, resume_player, pause_player, song_progress, seek};
 
 const TABLE_ROW_HEIGHT: f32 = 42.0;
 const TABLE_HEADER_HEIGHT: f32 = 42.0;
 const MIN_VISIBLE_TABLE_ROWS: usize = 1;
+const SONG_PROGRESS_DIVISIONS: f64 = 10000.0;
 
-#[derive(Default)]
 struct UIState {
     selected_tab: MediaPlayerTab,
     songs: Vec<AudioSource>,
@@ -21,6 +22,7 @@ struct UIState {
     first_visible_playlist: usize,
     player_state: MediaPlayerState,
     current_song: Option<Uuid>,
+    current_song_duration: Duration,
     song_progress: f64,
 }
 
@@ -67,6 +69,25 @@ pub enum UIMessage {
     NextSong,
     PreviousSong,
     ProgressChanged(f64),
+    Tick,
+}
+
+impl Default for UIState {
+    fn default() -> Self {
+        Self {
+            selected_tab: Default::default(),
+            songs: Default::default(),
+            selected_song: Default::default(),
+            first_visible_song: Default::default(),
+            playlists: Default::default(),
+            selected_playlist: Default::default(),
+            first_visible_playlist: Default::default(),
+            player_state: Default::default(),
+            current_song: Default::default(),
+            current_song_duration: Duration::MAX,
+            song_progress: Default::default(),
+        }
+    }
 }
 
 impl UIState {
@@ -111,6 +132,10 @@ impl UIState {
         self.first_visible_playlist = clamp_first_visible_row(self.first_visible_playlist, self.playlists.len(), MIN_VISIBLE_TABLE_ROWS);
     }
 
+    fn subscription(&self) -> Subscription<UIMessage> {
+        iced::time::every(Duration::from_millis(100)).map(|_| UIMessage::Tick)
+    }
+
     pub fn view(&self) -> Element<'_, UIMessage> {
         let tabs = row![
             tab_button("Songs", MediaPlayerTab::Songs, self.selected_tab == MediaPlayerTab::Songs,),
@@ -126,10 +151,6 @@ impl UIState {
     }
 
     pub fn update(&mut self, message: UIMessage) {
-        self.current_song = current_song();
-        self.player_state = MediaPlayerState::from(player_state());
-        self.song_progress = song_progress().as_secs_f64() / self.current_song.map(|uuid| MEDIA_LIBRARY.get().unwrap().read().unwrap().get_song_info(&uuid).unwrap().duration.as_secs_f64()).unwrap_or(1.0);
-
         match message {
             UIMessage::SelectTab(selected_tab) => {
                 self.selected_tab = selected_tab;
@@ -139,9 +160,6 @@ impl UIState {
                     self.selected_song = selected_song;
                 } else if let Some(index) = selected_song && let Some(song) = self.songs.get(index) {
                     play_song(song);
-                    self.current_song = Some(song.uuid);
-                    self.song_progress = 0.0;
-                    self.player_state = MediaPlayerState::from(player_state());
                 }
             }
             UIMessage::SelectPlaylist(selected_playlist) => {
@@ -162,21 +180,15 @@ impl UIState {
                     if let Some(index) = self.selected_song {
                         let song = self.songs.get(index).unwrap();
                         play_song(song);
-                        self.current_song = Some(song.uuid);
                     } else if let Some(first_song) = self.songs.first() {
                         play_song(first_song);
-                        self.current_song = Some(first_song.uuid);
-                        self.selected_song = Some(0);
                     }
-                    self.player_state = MediaPlayerState::from(player_state());
                 } else {
                     resume_player();
-                    self.player_state = MediaPlayerState::Playing;
                 }
             }
             UIMessage::Pause => {
                 pause_player();
-                self.player_state = MediaPlayerState::Paused;
             }
             UIMessage::NextSong => {
                 self.select_relative_song(1);
@@ -185,7 +197,13 @@ impl UIState {
                 self.select_relative_song(-1);
             }
             UIMessage::ProgressChanged(progress) => {
-                self.song_progress = progress;
+                seek(progress / SONG_PROGRESS_DIVISIONS);
+            }
+            UIMessage::Tick => {
+                self.player_state = MediaPlayerState::from(player_state());
+                self.current_song = current_song();
+                self.current_song_duration = self.current_song.map(|uuid| MEDIA_LIBRARY.get().unwrap().read().unwrap().get_song_info(&uuid).map(|audio| audio.duration).unwrap_or(Duration::MAX)).unwrap_or(Duration::MAX);
+                self.song_progress = SONG_PROGRESS_DIVISIONS * song_progress().as_secs_f64() / self.current_song_duration.as_secs_f64();
             }
         }
     }
@@ -286,17 +304,17 @@ impl UIState {
     fn media_controls(&self) -> Element<'_, UIMessage> {
         let current_song_title = self.current_song.and_then(|uuid| self.songs.iter().find(|song| song.uuid == uuid)).map(|song| song.title.as_str()).unwrap_or("No song selected");
 
-        let playback_status = match self.player_state {
-            MediaPlayerState::Stopped => "Stopped",
-            MediaPlayerState::Paused => "Paused",
-            MediaPlayerState::Playing => "Playing",
+        let progress_text = if self.player_state != MediaPlayerState::Stopped && self.current_song_duration != Duration::MAX {
+            format!("{} / {}", format_duration(self.current_song_duration.mul_f64(self.song_progress / SONG_PROGRESS_DIVISIONS)), format_duration(self.current_song_duration))
+        } else {
+            "-:-- / -:--".to_string()
         };
 
         let play_pause_button = if self.player_state == MediaPlayerState::Playing { button("Pause").on_press(UIMessage::Pause) } else { button("Play").on_press(UIMessage::Play) };
 
         column![
-            row![text(current_song_title).size(18), space().width(Length::Fill), text(playback_status),].align_y(Alignment::Center),
-            slider(0.0..=1.0, self.song_progress, UIMessage::ProgressChanged),
+            row![text(current_song_title).size(18), space().width(Length::Fill), text(progress_text),].align_y(Alignment::Center),
+            slider(0.0..=SONG_PROGRESS_DIVISIONS, self.song_progress, UIMessage::ProgressChanged),
             row![button("Previous").on_press(UIMessage::PreviousSong), play_pause_button, button("Next").on_press(UIMessage::NextSong),].spacing(8).align_y(Alignment::Center),
         ].spacing(8).into()
     }
@@ -389,7 +407,7 @@ fn table_cell<'a>(content: impl Into<String>, width_portion: u16) -> Element<'a,
     container(text(content.into())).width(Length::FillPortion(width_portion)).into()
 }
 
-fn format_duration(duration: std::time::Duration) -> String {
+fn format_duration(duration: Duration) -> String {
     let total_seconds = duration.as_secs();
     let minutes = total_seconds / 60;
     let seconds = total_seconds % 60;
@@ -398,5 +416,5 @@ fn format_duration(duration: std::time::Duration) -> String {
 }
 
 pub fn run_gui() -> iced::Result {
-    iced::application(UIState::new, UIState::update, UIState::view).run()
+    iced::application(UIState::new, UIState::update, UIState::view).subscription(UIState::subscription).run()
 }

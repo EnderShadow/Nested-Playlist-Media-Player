@@ -1,6 +1,7 @@
 use std::fs::File;
 use std::sync::{LazyLock, Mutex};
 use std::time::Duration;
+use iced::futures::AsyncSeekExt;
 use rodio::MixerDeviceSink;
 use uuid::Uuid;
 use media_player::{AudioSource, Playlist, PlaylistEntry};
@@ -191,4 +192,12 @@ pub fn player_state() -> PlayerState {
 pub fn song_progress() -> Duration {
     let player = PLAYER.lock().unwrap();
     player.player.get_pos()
+}
+
+pub fn seek(position: f64) {
+    let mut player = PLAYER.lock().unwrap();
+    if let Some(current_song) = player.current_song {
+        let duration = MEDIA_LIBRARY.get().unwrap().read().unwrap().get_song_info(&current_song).unwrap().duration;
+        player.seek(duration.mul_f64(position));
+    }
 }

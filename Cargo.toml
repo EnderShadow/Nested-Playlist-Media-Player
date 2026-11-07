@@ -11,7 +11,7 @@ serde_millis = "0.1.1"
 directories = "6.0.0"
 thiserror = "2.0.20"
 error-stack = { version = "0.8.0"}
-iced = "0.14.0"
+iced = { version = "0.14.0", features = ["tokio"] }
 ratag = "0.2.0"
 symphonia = { version = "0.6.1", features = ["all"] }
 rodio = { version = "0.23.0", features = ["symphonia-all"] }
