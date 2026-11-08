@@ -1,11 +1,14 @@
+use std::fs;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 use educe::Educe;
-use crate::{MEDIA_LIBRARY};
+use crate::MEDIA_LIBRARY;
 
 use iced::widget::{button, column, container, responsive, row, rule::horizontal as horizontal_rule, scrollable, slider, space, text};
-use iced::{Alignment, Background, Border, Element, Length, Size, Subscription, Theme};
-use iced_aw::{ContextMenu, TabLabel, Tabs};
+use iced::{Alignment, Background, Border, Element, Length, Size, Subscription, Task, Theme};
+use iced_aw::{ContextMenu, TabLabel, Tabs, menu::{Item, Menu}, menu_bar, menu_items};
 use media_player::{AudioSource, PlaylistInfo};
+use rfd::AsyncFileDialog;
 use uuid::Uuid;
 use crate::player::{current_song, PlayerState, player_state, play_song, resume_player, pause_player, song_progress, seek, set_volume, previous_song, next_song, enqueue_song, play_playlist, enqueue_playlist, LoopMode, toggle_shuffle, cycle_loop_mode};
 
@@ -13,6 +16,7 @@ const TABLE_ROW_HEIGHT: f32 = 42.0;
 const TABLE_HEADER_HEIGHT: f32 = 42.0;
 const MIN_VISIBLE_TABLE_ROWS: usize = 1;
 const SONG_PROGRESS_DIVISIONS: f64 = 10000.0;
+const AUDIO_EXTENSIONS: &[&str] = &["aac", "aif", "aiff", "caf", "flac", "m4a", "mka", "mkv", "mp3", "mp4", "ogg", "opus", "wav", "webm"];
 
 #[derive(Educe)]
 #[educe(Default)]
@@ -88,6 +92,12 @@ pub enum UIMessage {
     EnqueuePlaylist(usize),
     ToggleShuffle,
     CycleLoopMode,
+    AddSongFiles,
+    AddSongFolder,
+    SongsAdded(usize),
+    ExportLibrary,
+    ExportLibraryTo(Option<PathBuf>),
+    Quit,
 }
 
 impl UIState {
@@ -155,13 +165,16 @@ impl UIState {
             )
             .set_active_tab(&self.selected_tab);
 
-        column![tabs, horizontal_rule(1), self.media_controls()]
-            .padding(16)
-            .spacing(12)
-            .into()
+        column![
+            self.menu_bar(),
+            column![tabs, horizontal_rule(1), self.media_controls()]
+                .padding(16)
+                .spacing(12)
+        ]
+        .into()
     }
 
-    pub fn update(&mut self, message: UIMessage) {
+    pub fn update(&mut self, message: UIMessage) -> Task<UIMessage> {
         match message {
             UIMessage::SelectTab(selected_tab) => {
                 self.selected_tab = selected_tab;
@@ -241,6 +254,65 @@ impl UIState {
             UIMessage::CycleLoopMode => {
                 cycle_loop_mode();
             }
+            UIMessage::AddSongFiles => {
+                return Task::perform(
+                    async {
+                        let files = AsyncFileDialog::new()
+                            .add_filter("Audio files", AUDIO_EXTENSIONS)
+                            .pick_files()
+                            .await;
+                        files.map(|files| add_song_paths(files.into_iter().map(|file| file.path().to_path_buf()).collect())).unwrap_or_default()
+                    },
+                    UIMessage::SongsAdded,
+                );
+            }
+            UIMessage::AddSongFolder => {
+                return Task::perform(
+                    async {
+                        let folder = AsyncFileDialog::new().pick_folder().await;
+                        folder.map(|folder| {
+                            let mut paths = Vec::new();
+                            collect_audio_files(folder.path(), &mut paths);
+                            add_song_paths(paths)
+                        }).unwrap_or_default()
+                    },
+                    UIMessage::SongsAdded,
+                );
+            }
+            UIMessage::SongsAdded(added) => {
+                if added > 0 {
+                    let selected_song = self.selected_song.map(|idx| self.songs.get(idx).map(|song| song.uuid)).flatten();
+                    self.reload_library_data();
+                    if let Some(selected_song) = selected_song {
+                        self.selected_song = Some(self.songs.iter().position(|song| song.uuid == selected_song).unwrap_or_default());
+                    }
+                    println!("Added {added} song(s) to the library");
+                }
+            }
+            UIMessage::ExportLibrary => {
+                return Task::perform(
+                    async {
+                        AsyncFileDialog::new()
+                            .set_file_name("library_export.json")
+                            .save_file()
+                            .await
+                            .map(|file| file.path().to_path_buf())
+                    },
+                    UIMessage::ExportLibraryTo,
+                );
+            }
+            UIMessage::ExportLibraryTo(path) => {
+                if let Some(path) = path
+                    && let Some(library_lock) = MEDIA_LIBRARY.get()
+                    && let Ok(library) = library_lock.read()
+                    && let Err(error) = library.export_library(&path)
+                {
+                    println!("Failed to export library: {error:?}");
+                }
+            }
+            UIMessage::Quit => {
+                return iced::exit();
+            }
             UIMessage::Tick => {
                 let (state, shuffle_enabled, loop_mode) = player_state();
                 self.player_state = MediaPlayerState::from(state);
@@ -251,6 +323,21 @@ impl UIState {
                 self.loop_mode = loop_mode;
             }
         }
+        Task::none()
+    }
+
+    fn menu_bar(&self) -> Element<'_, UIMessage> {
+        menu_bar!(Item::with_menu(
+            button("File").style(button::text),
+            Menu::new(menu_items!(
+                (button("Add Files...").style(button::text).on_press(UIMessage::AddSongFiles)),
+                (button("Add Folder...").style(button::text).on_press(UIMessage::AddSongFolder)),
+                (button("Export Library...").style(button::text).on_press(UIMessage::ExportLibrary)),
+                (button("Quit").style(button::text).on_press(UIMessage::Quit)),
+            ))
+            .width(Length::Shrink)
+        ))
+        .into()
     }
 
     fn song_table(&self) -> Element<'_, UIMessage> {
@@ -489,4 +576,47 @@ fn format_duration(duration: Option<Duration>) -> String {
 
 pub fn run_gui() -> iced::Result {
     iced::application(UIState::new, UIState::update, UIState::view).theme(UIState::theme).subscription(UIState::subscription).run()
+}
+
+fn add_song_paths(paths: Vec<PathBuf>) -> usize {
+    let Some(library_lock) = MEDIA_LIBRARY.get() else {
+        return 0;
+    };
+
+    if let Ok(mut library) = library_lock.write() {
+        let num_added = paths.into_iter().filter_map(|path| library.add_song(path)).count();
+
+        if let Err(error) = library.save() {
+            println!("Failed to save library after adding songs: {error:?}");
+        }
+
+        num_added
+    } else {
+        0
+    }
+}
+
+fn collect_audio_files(directory: &Path, paths: &mut Vec<PathBuf>) {
+    let Ok(entries) = fs::read_dir(directory) else {
+        return;
+    };
+
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let Ok(file_type) = entry.file_type() else {
+            continue;
+        };
+
+        if file_type.is_dir() {
+            collect_audio_files(&path, paths);
+        } else if file_type.is_file() && is_audio_file(&path) {
+            paths.push(path);
+        }
+    }
+}
+
+fn is_audio_file(path: &Path) -> bool {
+    path.extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| AUDIO_EXTENSIONS.contains(&extension.to_ascii_lowercase().as_str()))
 }

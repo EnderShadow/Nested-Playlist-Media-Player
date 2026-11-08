@@ -207,6 +207,13 @@ impl MediaLibrary {
         Ok(())
     }
 
+    pub fn export_library(&self, path: &Path) -> Result<(), Report<LoadSaveError>> {
+        // TODO: Implement library export.
+        let _ = path;
+        println!("not implemented");
+        Ok(())
+    }
+
     pub fn load(config: Config) -> Result<Self, Report<LoadSaveError>> {
         let mut library = Self::new(config);
 
