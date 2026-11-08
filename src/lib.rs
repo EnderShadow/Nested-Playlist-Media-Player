@@ -331,7 +331,14 @@ impl MediaLibrary {
             }).collect()
     }
 
-    pub fn add_song(&mut self, path: PathBuf) -> Uuid {
+    pub fn add_song(&mut self, path: PathBuf) -> Option<Uuid> {
+        let canonical_path = path.canonicalize().ok()?;
+        for song in self.songs.values() {
+            if let Ok(song_path) = song.path.canonicalize() && song_path == canonical_path {
+                return None;
+            }
+        }
+
         let uuid = loop {
             let uuid = Uuid::new_v4();
             if !self.songs.contains_key(&uuid) {
@@ -361,7 +368,7 @@ impl MediaLibrary {
         self.songs.insert(uuid, song);
         self.dirty = true;
 
-        uuid
+        Some(uuid)
     }
 
     pub fn delete_song(&mut self, uuid: Uuid) -> bool {
