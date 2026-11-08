@@ -95,8 +95,13 @@ pub enum UIMessage {
     AddSongFiles,
     AddSongFolder,
     SongsAdded(usize),
-    ExportLibrary,
-    ExportLibraryTo(Option<PathBuf>),
+    ExportBackup,
+    ExportBackupTo(Option<PathBuf>),
+    ExportM3u,
+    ExportM3uTo(Option<PathBuf>),
+    ExportFinished(Result<(), String>),
+    ImportLibrary,
+    LibraryImported(Option<Result<(usize, usize), String>>),
     Quit,
 }
 
@@ -289,26 +294,81 @@ impl UIState {
                     println!("Added {added} song(s) to the library");
                 }
             }
-            UIMessage::ExportLibrary => {
+            UIMessage::ExportBackup => {
                 return Task::perform(
                     async {
                         AsyncFileDialog::new()
-                            .set_file_name("library_export.json")
+                            .add_filter("ZIP archives", &["zip"])
+                            .set_file_name("library_backup.zip")
                             .save_file()
                             .await
                             .map(|file| file.path().to_path_buf())
                     },
-                    UIMessage::ExportLibraryTo,
+                    UIMessage::ExportBackupTo,
                 );
             }
-            UIMessage::ExportLibraryTo(path) => {
-                if let Some(path) = path
-                    && let Some(library_lock) = MEDIA_LIBRARY.get()
-                    && let Ok(library) = library_lock.read()
-                    && let Err(error) = library.export_library(&path)
-                {
-                    println!("Failed to export library: {error:?}");
-                }
+            UIMessage::ExportBackupTo(Some(path)) => {
+                return Task::perform(async move {
+                    MEDIA_LIBRARY.get()
+                        .ok_or_else(|| "Media library is unavailable".to_string())
+                        .and_then(|library_lock| library_lock.read().map_err(|error| format!("Failed to lock media library: {error}")))
+                        .and_then(|library| library.export_backup(&path).map_err(|error| format!("{error:?}")))
+                }, UIMessage::ExportFinished);
+            }
+            UIMessage::ExportBackupTo(None) => {}
+            UIMessage::ExportM3u => {
+                return Task::perform(
+                    async {
+                        AsyncFileDialog::new()
+                            .add_filter("ZIP archives", &["zip"])
+                            .set_file_name("library_m3u.zip")
+                            .save_file()
+                            .await
+                            .map(|file| file.path().to_path_buf())
+                    },
+                    UIMessage::ExportM3uTo,
+                );
+            }
+            UIMessage::ExportM3uTo(Some(path)) => {
+                return Task::perform(async move {
+                    MEDIA_LIBRARY.get()
+                        .ok_or_else(|| "Media library is unavailable".to_string())
+                        .and_then(|library_lock| library_lock.read().map_err(|error| format!("Failed to lock media library: {error}")))
+                        .and_then(|library| library.export_m3u(&path).map_err(|error| format!("{error:?}")))
+                }, UIMessage::ExportFinished);
+            }
+            UIMessage::ExportM3uTo(None) => {}
+            UIMessage::ExportFinished(result) => match result {
+                Ok(()) => println!("Library export completed"),
+                Err(error) => println!("Failed to export library: {error}"),
+            },
+            UIMessage::ImportLibrary => {
+                return Task::perform(async {
+                    let file = AsyncFileDialog::new()
+                        .add_filter("ZIP archives", &["zip"])
+                        .pick_file()
+                        .await;
+                    file.map(|file| {
+                        let Some(library_lock) = MEDIA_LIBRARY.get() else {
+                            return Err("Media library is unavailable".to_string());
+                        };
+                        let Ok(mut library) = library_lock.write() else {
+                            return Err("Failed to lock media library".to_string());
+                        };
+                        library.import_backup(file.path())
+                            .map(|summary| (summary.songs, summary.playlists))
+                            .map_err(|error| format!("{error:?}"))
+                    })
+                }, UIMessage::LibraryImported);
+            }
+            UIMessage::LibraryImported(Some(Ok((songs, playlists)))) => {
+                self.reload_library_data();
+                println!("Imported {songs} song(s) and {playlists} playlist(s)");
+            }
+            UIMessage::LibraryImported(Some(Err(error))) => {
+                println!("Failed to import library: {error}");
+            }
+            UIMessage::LibraryImported(None) => {
             }
             UIMessage::Quit => {
                 return iced::exit();
@@ -332,7 +392,9 @@ impl UIState {
             Menu::new(menu_items!(
                 (button("Add Files...").style(button::text).on_press(UIMessage::AddSongFiles)),
                 (button("Add Folder...").style(button::text).on_press(UIMessage::AddSongFolder)),
-                (button("Export Library...").style(button::text).on_press(UIMessage::ExportLibrary)),
+                (button("Export Backup...").style(button::text).on_press(UIMessage::ExportBackup)),
+                (button("Export as M3U...").style(button::text).on_press(UIMessage::ExportM3u)),
+                (button("Import Library...").style(button::text).on_press(UIMessage::ImportLibrary)),
                 (button("Quit").style(button::text).on_press(UIMessage::Quit)),
             ))
             .width(Length::Shrink)

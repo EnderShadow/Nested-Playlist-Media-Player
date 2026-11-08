@@ -14,6 +14,7 @@ error-stack = { version = "0.8.0"}
 iced = { version = "0.14.0", features = ["tokio"] }
 iced_aw = { version = "0.14.1", features = ["full"]}
 rfd = { version = "0.18.0", default-features = false, features = ["xdg-portal", "wayland"] }
+zip = { version = "9.4.2", default-features = false, features = ["deflate"] }
 symphonia = { version = "0.6.1", features = ["all"] }
 rodio = { version = "0.23.0", features = ["symphonia-all"] }
 educe = "0.8.1"

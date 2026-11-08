@@ -1,9 +1,9 @@
 use error_stack::{IntoReport, Report};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::fs::File;
-use std::io::Write;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 use symphonia::core::formats::{FormatOptions, TrackType};
@@ -13,6 +13,8 @@ use symphonia::core::meta::{MetadataOptions, StandardTag};
 use symphonia::default::get_probe;
 use thiserror::Error;
 use uuid::Uuid;
+use zip::write::{SimpleFileOptions, ZipWriter};
+use zip::{CompressionMethod, ZipArchive};
 
 #[derive(Error, Debug)]
 pub enum LoadSaveError {
@@ -20,6 +22,20 @@ pub enum LoadSaveError {
     IOError(#[from] std::io::Error),
     #[error(transparent)]
     SerdeError(#[from] serde_json::Error),
+    #[error(transparent)]
+    ZipError(#[from] zip::result::ZipError),
+}
+
+#[derive(Debug, Default, Eq, PartialEq)]
+pub struct ImportSummary {
+    pub songs: usize,
+    pub playlists: usize,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct BackupManifest {
+    format_version: u32,
 }
 
 #[derive(Error, Debug)]
@@ -207,11 +223,243 @@ impl MediaLibrary {
         Ok(())
     }
 
-    pub fn export_library(&self, path: &Path) -> Result<(), Report<LoadSaveError>> {
-        // TODO: Implement library export.
-        let _ = path;
-        println!("not implemented");
-        Ok(())
+    pub fn export_backup(&self, path: &Path) -> Result<(), Report<LoadSaveError>> {
+        write_zip_atomic(path, |archive| {
+            let manifest = serde_json::to_vec(&BackupManifest { format_version: 1 })
+                .map_err(|error| LoadSaveError::from(error).into_report().attach("Failed to serialize backup manifest"))?;
+            archive.start_file("manifest.json", SimpleFileOptions::default())
+                .map_err(|error| LoadSaveError::from(error).into_report().attach("Failed to add backup manifest"))?;
+            archive.write_all(&manifest)
+                .map_err(|error| LoadSaveError::from(error).into_report().attach("Failed to write backup manifest"))?;
+
+            let mut songs = self.songs.values().collect::<Vec<_>>();
+            songs.sort_unstable_by_key(|song| song.uuid);
+            let mut exported_songs = Vec::new();
+            for song in songs {
+                let archive_path = backup_song_path(song.uuid, &song.path);
+                let mut source = match File::open(&song.path) {
+                    Ok(source) => source,
+                    Err(error) => {
+                        eprintln!("Skipping song {} during backup: {error}", song.uuid);
+                        continue;
+                    }
+                };
+
+                archive.start_file(&archive_path, SimpleFileOptions::default().compression_method(CompressionMethod::Stored))
+                    .map_err(|error| LoadSaveError::from(error).into_report().attach("Failed to add audio file to backup"))?;
+                std::io::copy(&mut source, archive)
+                    .map_err(|error| LoadSaveError::from(error).into_report().attach("Failed to copy audio file to backup"))?;
+
+                let mut exported_song = song.clone();
+                exported_song.path = PathBuf::from(archive_path);
+                exported_songs.push(exported_song);
+            }
+
+            archive.start_file("library.json", SimpleFileOptions::default())
+                .map_err(|error| LoadSaveError::from(error).into_report().attach("Failed to add library data to backup"))?;
+            serde_json::to_writer(&mut *archive, &exported_songs)
+                .map_err(|error| LoadSaveError::from(error).into_report().attach("Failed to write library data to backup"))?;
+
+            let mut playlists = self.playlists.values().collect::<Vec<_>>();
+            playlists.sort_unstable_by_key(|playlist| playlist.uuid);
+            for playlist in playlists {
+                archive.start_file(format!("playlists/{}.json", playlist.uuid), SimpleFileOptions::default())
+                    .map_err(|error| LoadSaveError::from(error).into_report().attach("Failed to add playlist to backup"))?;
+                serde_json::to_writer(&mut *archive, playlist)
+                    .map_err(|error| LoadSaveError::from(error).into_report().attach("Failed to write playlist to backup"))?;
+            }
+
+            Ok(())
+        })
+    }
+
+    pub fn export_m3u(&self, path: &Path) -> Result<(), Report<LoadSaveError>> {
+        write_zip_atomic(path, |archive| {
+            let mut songs = self.songs.values().collect::<Vec<_>>();
+            songs.sort_by_key(|song| (
+                song.artist.as_deref().unwrap_or("").to_lowercase(),
+                song.title.to_lowercase(),
+                song.uuid,
+            ));
+
+            let mut used_song_names = HashSet::new();
+            let mut exported_song_paths = HashMap::new();
+            for song in &songs {
+                let artist = song.artist.as_deref().unwrap_or("").trim();
+                let title = song.title.trim();
+                let base_name = if artist.is_empty() { title.to_string() } else { format!("{artist} - {title}") };
+                let file_name = unique_filename(&base_name, &safe_extension(&song.path), &mut used_song_names);
+                let mut source = match File::open(&song.path) {
+                    Ok(source) => source,
+                    Err(error) => {
+                        eprintln!("Skipping song {} during M3U export: {error}", song.uuid);
+                        continue;
+                    }
+                };
+
+                archive.start_file(format!("songs/{file_name}"), SimpleFileOptions::default().compression_method(CompressionMethod::Stored))
+                    .map_err(|error| LoadSaveError::from(error).into_report().attach("Failed to add audio file to M3U archive"))?;
+                std::io::copy(&mut source, archive)
+                    .map_err(|error| LoadSaveError::from(error).into_report().attach("Failed to copy audio file to M3U archive"))?;
+                exported_song_paths.insert(song.uuid, format!("songs/{file_name}"));
+            }
+
+            let mut all_songs = String::from("#EXTM3U\n");
+            for song in &songs {
+                if let Some(relative_path) = exported_song_paths.get(&song.uuid) {
+                    append_m3u_entry(&mut all_songs, song, relative_path);
+                }
+            }
+            archive.start_file("All Songs.m3u", SimpleFileOptions::default())
+                .map_err(|error| LoadSaveError::from(error).into_report().attach("Failed to add All Songs playlist"))?;
+            archive.write_all(all_songs.as_bytes())
+                .map_err(|error| LoadSaveError::from(error).into_report().attach("Failed to write All Songs playlist"))?;
+
+            let mut playlists = self.playlists.values().collect::<Vec<_>>();
+            playlists.sort_by_key(|playlist| (playlist.name.to_lowercase(), playlist.uuid));
+            let mut used_playlist_names = HashSet::from(["all songs.m3u".to_string()]);
+            for playlist in playlists {
+                let playlist_file_name = unique_filename(&playlist.name, "m3u", &mut used_playlist_names);
+                let mut entries = String::from("#EXTM3U\n");
+                let mut flattened_songs = Vec::new();
+                self.flatten_playlist(playlist.uuid, &mut HashSet::new(), &mut flattened_songs);
+                for uuid in flattened_songs {
+                    if let (Some(song), Some(relative_path)) = (self.songs.get(&uuid), exported_song_paths.get(&uuid)) {
+                        append_m3u_entry(&mut entries, song, relative_path);
+                    }
+                }
+
+                archive.start_file(playlist_file_name, SimpleFileOptions::default())
+                    .map_err(|error| LoadSaveError::from(error).into_report().attach("Failed to add playlist M3U file"))?;
+                archive.write_all(entries.as_bytes())
+                    .map_err(|error| LoadSaveError::from(error).into_report().attach("Failed to write playlist M3U file"))?;
+            }
+
+            Ok(())
+        })
+    }
+
+    pub fn import_backup(&mut self, path: &Path) -> Result<ImportSummary, Report<LoadSaveError>> {
+        let file = File::open(path).map_err(|error| LoadSaveError::from(error).into_report().attach("Failed to open library backup"))?;
+        let mut archive = ZipArchive::new(file)
+            .map_err(|error| LoadSaveError::from(error).into_report().attach("Failed to read library backup"))?;
+        let mut songs: Vec<AudioSource> = {
+            let mut library_file = archive.by_name("library.json")
+                .map_err(|error| LoadSaveError::from(error).into_report().attach("Backup does not contain library.json"))?;
+            serde_json::from_reader(&mut library_file)
+                .map_err(|error| LoadSaveError::from(error).into_report().attach("Failed to parse backup library"))?
+        };
+
+        let song_directory = Path::new(&self.config.data_directory).join("songs");
+        fs::create_dir_all(&song_directory)
+            .map_err(|error| LoadSaveError::from(error).into_report().attach("Failed to create imported song directory"))?;
+        let mut summary = ImportSummary::default();
+        for song in &mut songs {
+            if self.songs.contains_key(&song.uuid) {
+                continue;
+            }
+
+            let archive_path = backup_song_path(song.uuid, &song.path);
+            let destination = song_directory.join(backup_song_filename(song.uuid, &song.path));
+            let temporary = destination.with_added_extension("tmp");
+            let copy_result = (|| -> Result<(), Report<LoadSaveError>> {
+                let mut source = archive.by_name(&archive_path)
+                    .map_err(|error| LoadSaveError::from(error).into_report().attach("Backup is missing an audio file"))?;
+                let mut output = File::create(&temporary)
+                    .map_err(|error| LoadSaveError::from(error).into_report().attach("Failed to create imported audio file"))?;
+                std::io::copy(&mut source, &mut output)
+                    .map_err(|error| LoadSaveError::from(error).into_report().attach("Failed to extract imported audio file"))?;
+                output.sync_all()
+                    .map_err(|error| LoadSaveError::from(error).into_report().attach("Failed to sync imported audio file"))?;
+                fs::rename(&temporary, &destination)
+                    .map_err(|error| LoadSaveError::from(error).into_report().attach("Failed to install imported audio file"))?;
+                Ok(())
+            })();
+            if let Err(error) = copy_result {
+                let _ = fs::remove_file(&temporary);
+                eprintln!("Skipping song {} during library import: {error:?}", song.uuid);
+                continue;
+            }
+
+            song.path = destination;
+            let imported_song = read_song_metadata(&song.path, song.uuid).unwrap_or_else(|| song.clone());
+            self.songs.insert(song.uuid, imported_song);
+            self.dirty = true;
+            summary.songs += 1;
+        }
+
+        let mut playlist_candidates = Vec::new();
+        let mut candidate_uuids = HashSet::new();
+        for index in 0..archive.len() {
+            let mut entry = archive.by_index(index)
+                .map_err(|error| LoadSaveError::from(error).into_report().attach("Failed to read playlist from backup"))?;
+            let name = match entry.name() {
+                Ok(name) => name.into_owned(),
+                Err(error) => {
+                    eprintln!("Skipping playlist with an invalid archive name: {error}");
+                    continue;
+                }
+            };
+            if !name.starts_with("playlists/") || !name.ends_with(".json") || entry.is_dir() {
+                continue;
+            }
+
+            let mut data = Vec::new();
+            if let Err(error) = entry.read_to_end(&mut data) {
+                eprintln!("Skipping unreadable playlist in backup: {error}");
+                continue;
+            }
+            let playlist: Playlist = match serde_json::from_slice(&data) {
+                Ok(playlist) => playlist,
+                Err(error) => {
+                    eprintln!("Skipping invalid playlist in backup: {error}");
+                    continue;
+                }
+            };
+            if self.playlists.contains_key(&playlist.uuid) || !candidate_uuids.insert(playlist.uuid) {
+                continue;
+            }
+
+            let playlist_uuid = playlist.uuid;
+            let playlist_name = playlist.name.clone();
+            let playlist_description = playlist.description.clone();
+            let entries = playlist.contents.clone();
+            self.playlists.insert(playlist_uuid, Playlist::new(playlist_uuid, playlist_name, playlist_description));
+            playlist_candidates.push((playlist_uuid, entries));
+            summary.playlists += 1;
+        }
+
+        for (playlist_uuid, entries) in playlist_candidates {
+            for entry in entries {
+                let exists = match entry {
+                    PlaylistEntry::Song(uuid) => self.songs.contains_key(&uuid),
+                    PlaylistEntry::Playlist(uuid) => self.playlists.contains_key(&uuid),
+                };
+                if exists {
+                    // This also rejects nested playlist entries that would introduce a cycle.
+                    let _ = self.add_to_playlist(entry, playlist_uuid);
+                }
+            }
+        }
+
+        self.save()?;
+        Ok(summary)
+    }
+
+    fn flatten_playlist(&self, uuid: Uuid, visiting: &mut HashSet<Uuid>, songs: &mut Vec<Uuid>) {
+        if !visiting.insert(uuid) {
+            return;
+        }
+        if let Some(playlist) = self.playlists.get(&uuid) {
+            for entry in &playlist.contents {
+                match entry {
+                    PlaylistEntry::Song(song_uuid) if self.songs.contains_key(song_uuid) => songs.push(*song_uuid),
+                    PlaylistEntry::Playlist(playlist_uuid) => self.flatten_playlist(*playlist_uuid, visiting, songs),
+                    _ => (),
+                }
+            }
+        }
+        visiting.remove(&uuid);
     }
 
     pub fn load(config: Config) -> Result<Self, Report<LoadSaveError>> {
@@ -520,6 +768,88 @@ impl MediaLibrary {
     }
 }
 
+fn write_zip_atomic(
+    path: &Path,
+    write_entries: impl FnOnce(&mut ZipWriter<File>) -> Result<(), Report<LoadSaveError>>,
+) -> Result<(), Report<LoadSaveError>> {
+    let temporary_path = path.with_added_extension("tmp");
+    let result = (|| {
+        let file = File::create(&temporary_path)
+            .map_err(|error| LoadSaveError::from(error).into_report().attach("Failed to create temporary export archive"))?;
+        let mut archive = ZipWriter::new(file);
+        write_entries(&mut archive)?;
+        let file = archive.finish()
+            .map_err(|error| LoadSaveError::from(error).into_report().attach("Failed to finish export archive"))?;
+        file.sync_all()
+            .map_err(|error| LoadSaveError::from(error).into_report().attach("Failed to sync export archive"))?;
+        fs::rename(&temporary_path, path)
+            .map_err(|error| LoadSaveError::from(error).into_report().attach("Failed to install export archive"))?;
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(temporary_path);
+    }
+    result
+}
+
+fn backup_song_path(uuid: Uuid, path: &Path) -> String {
+    format!("songs/{}", backup_song_filename(uuid, path))
+}
+
+fn backup_song_filename(uuid: Uuid, path: &Path) -> String {
+    format!("{uuid}.{}", safe_extension(path))
+}
+
+fn safe_extension(path: &Path) -> String {
+    let extension = path.extension().and_then(|extension| extension.to_str()).unwrap_or("");
+    let sanitized = extension.chars()
+        .filter(|character| character.is_ascii_alphanumeric())
+        .collect::<String>()
+        .to_ascii_lowercase();
+    if sanitized.is_empty() { "audio".to_string() } else { sanitized }
+}
+
+fn safe_filename_component(value: &str) -> String {
+    let mut sanitized = value.chars().map(|character| {
+        if character.is_control() || matches!(character, '/' | '\\' | '<' | '>' | ':' | '"' | '|' | '?' | '*' | '#') {
+            '_'
+        } else {
+            character
+        }
+    }).collect::<String>();
+    sanitized = sanitized.trim().trim_matches('.').to_string();
+    if sanitized.is_empty() { "Untitled".to_string() } else { sanitized }
+}
+
+fn unique_filename(base_name: &str, extension: &str, used_names: &mut HashSet<String>) -> String {
+    let base_name = safe_filename_component(base_name);
+    let extension = safe_extension(Path::new(&format!("file.{extension}")));
+    let mut suffix = 1;
+    loop {
+        let candidate = if suffix == 1 {
+            format!("{base_name}.{extension}")
+        } else {
+            format!("{base_name} ({suffix}).{extension}")
+        };
+        if used_names.insert(candidate.to_lowercase()) {
+            return candidate;
+        }
+        suffix += 1;
+    }
+}
+
+fn append_m3u_entry(output: &mut String, song: &AudioSource, relative_path: &str) {
+    let duration = song.duration.map(|duration| duration.as_secs().min(i64::MAX as u64) as i64).unwrap_or(-1);
+    let artist = song.artist.as_deref().map(safe_m3u_text).unwrap_or_default();
+    let title = safe_m3u_text(&song.title);
+    let display_name = if artist.is_empty() { title } else { format!("{artist} - {title}") };
+    output.push_str(&format!("#EXTINF:{duration},{display_name}\n{relative_path}\n"));
+}
+
+fn safe_m3u_text(value: &str) -> String {
+    value.chars().map(|character| if character.is_control() { ' ' } else { character }).collect::<String>()
+}
+
 fn read_song_metadata(path: impl AsRef<Path>, uuid: Uuid) -> Option<AudioSource> {
     let file = File::open(&path).ok()?;
     let mss = MediaSourceStream::new(Box::new(file), Default::default());
@@ -601,4 +931,109 @@ fn read_song_metadata(path: impl AsRef<Path>, uuid: Uuid) -> Option<AudioSource>
 pub struct Config {
     #[serde(default)]
     pub data_directory: PathBuf,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_directory(label: &str) -> PathBuf {
+        std::env::temp_dir().join(format!("media-player-{label}-{}", Uuid::new_v4()))
+    }
+
+    fn library_with_songs(data_directory: PathBuf) -> (MediaLibrary, Vec<Uuid>) {
+        let source_directory = data_directory.join("source");
+        fs::create_dir_all(&source_directory).unwrap();
+        let mut library = MediaLibrary::new(Config { data_directory });
+        let mut uuids = Vec::new();
+        for (index, (artist, title)) in [("Artist", "Track One"), ("Artist", "Track Two")].into_iter().enumerate() {
+            let path = source_directory.join(format!("track-{index}.mp3"));
+            fs::write(&path, format!("fake audio data {index}")).unwrap();
+            let uuid = Uuid::new_v4();
+            library.songs.insert(uuid, AudioSource {
+                uuid,
+                path,
+                title: title.to_string(),
+                artist: Some(artist.to_string()),
+                album: None,
+                genre: None,
+                album_artist: None,
+                track_number: None,
+                track_count: None,
+                year: None,
+                duration: Some(Duration::from_secs(125 + index as u64)),
+            });
+            uuids.push(uuid);
+        }
+        library.dirty = true;
+        (library, uuids)
+    }
+
+    #[test]
+    fn backup_round_trip_preserves_uuids_audio_and_nested_playlists() {
+        let root = test_directory("backup-round-trip");
+        let (mut original, song_uuids) = library_with_songs(root.join("original"));
+        let nested_uuid = original.create_playlist("Nested set".to_string(), String::new());
+        let playlist_uuid = original.create_playlist("Road mix".to_string(), String::new());
+        assert!(original.add_to_playlist(PlaylistEntry::Song(song_uuids[0]), nested_uuid).is_ok());
+        assert!(original.add_to_playlist(PlaylistEntry::Playlist(nested_uuid), playlist_uuid).is_ok());
+        assert!(original.add_to_playlist(PlaylistEntry::Song(song_uuids[1]), playlist_uuid).is_ok());
+        let backup_path = root.join("library.zip");
+        original.export_backup(&backup_path).unwrap();
+
+        let file = File::open(&backup_path).unwrap();
+        let mut archive = ZipArchive::new(file).unwrap();
+        let manifest: serde_json::Value = serde_json::from_reader(archive.by_name("manifest.json").unwrap()).unwrap();
+        assert_eq!(manifest["formatVersion"], 1);
+        assert!(archive.by_name(&format!("playlists/{playlist_uuid}.json")).is_ok());
+
+        let mut imported = MediaLibrary::new(Config { data_directory: root.join("imported") });
+        let summary = imported.import_backup(&backup_path).unwrap();
+        assert_eq!(summary.songs, 2);
+        assert_eq!(summary.playlists, 2);
+        for (index, uuid) in song_uuids.iter().copied().enumerate() {
+            let song = imported.get_song(&uuid).unwrap();
+            assert_eq!(song.uuid, uuid);
+            assert!(song.path.exists());
+            assert_eq!(fs::read(song.path).unwrap(), format!("fake audio data {index}").into_bytes());
+        }
+        assert_eq!(imported.get_playlist_length(playlist_uuid), Some(2));
+        assert_eq!(imported.get_playlist_contents(playlist_uuid).unwrap().len(), 2);
+        assert_eq!(imported.get_playlist_info(&playlist_uuid).unwrap().name, "Road mix");
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn m3u_export_copies_songs_and_flattens_nested_playlists() {
+        let root = test_directory("m3u-export");
+        let (mut library, song_uuids) = library_with_songs(root.join("library"));
+        let nested_uuid = library.create_playlist("Nested Playlist".to_string(), String::new());
+        let playlist_uuid = library.create_playlist("Road Mix".to_string(), String::new());
+        let reserved_name_uuid = library.create_playlist("All Songs".to_string(), String::new());
+        assert!(library.add_to_playlist(PlaylistEntry::Song(song_uuids[0]), nested_uuid).is_ok());
+        assert!(library.add_to_playlist(PlaylistEntry::Playlist(nested_uuid), playlist_uuid).is_ok());
+        assert!(library.add_to_playlist(PlaylistEntry::Song(song_uuids[1]), playlist_uuid).is_ok());
+        assert!(library.add_to_playlist(PlaylistEntry::Song(song_uuids[0]), reserved_name_uuid).is_ok());
+        let export_path = root.join("players.zip");
+        library.export_m3u(&export_path).unwrap();
+
+        let file = File::open(&export_path).unwrap();
+        let mut archive = ZipArchive::new(file).unwrap();
+        let mut all_songs = String::new();
+        archive.by_name("All Songs.m3u").unwrap().read_to_string(&mut all_songs).unwrap();
+        assert_eq!(all_songs.matches("#EXTINF:").count(), 2);
+        assert!(all_songs.contains("songs/Artist - Track One.mp3"));
+
+        let mut playlist = String::new();
+        archive.by_name("Road Mix.m3u").unwrap().read_to_string(&mut playlist).unwrap();
+        assert_eq!(playlist.matches("#EXTINF:").count(), 2);
+        assert!(playlist.contains("songs/Artist - Track One.mp3"));
+        assert!(playlist.contains("songs/Artist - Track Two.mp3"));
+        assert!(archive.by_name("Nested Playlist.m3u").is_ok());
+        assert!(archive.by_name("All Songs (2).m3u").is_ok());
+        assert!(archive.by_name("songs/Artist - Track Two.mp3").is_ok());
+
+        fs::remove_dir_all(root).unwrap();
+    }
 }
