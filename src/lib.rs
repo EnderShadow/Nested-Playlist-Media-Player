@@ -183,8 +183,10 @@ impl MediaLibrary {
             let library_file = data_dir.join("library.json");
             let new_library_file = library_file.with_added_extension("new");
             let mut file = File::create(&new_library_file).map_err(|e| LoadSaveError::from(e).into_report().attach("Failed to create library file"))?;
+            let mut songs = self.songs.values().collect::<Vec<_>>();
+            songs.sort_unstable_by_key(|s| s.uuid);
             // This should never fail
-            let data = serde_json::to_string(&self.songs.values().collect::<Vec<_>>()).expect("Failed to serialize library");
+            let data = serde_json::to_string(&songs).expect("Failed to serialize library");
             file.write_all(data.as_bytes()).map_err(|e| LoadSaveError::from(e).into_report().attach("Failed to write library to file"))?;
             file.sync_all().map_err(|e| LoadSaveError::from(e).into_report().attach("Failed to sync library file"))?;
             fs::rename(new_library_file, library_file).map_err(|e| LoadSaveError::from(e).into_report().attach("Failed to overwrite old library file with new library file"))?;
