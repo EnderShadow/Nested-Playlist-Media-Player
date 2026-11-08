@@ -245,13 +245,20 @@ impl MediaLibrary {
         for song in songs {
             let path = song.path.clone();
             // fallback to the metadata read from the library file if we cannot read the metadata from the file (e.g. song doesn't exist on disk or is not of a compatible file type with the metadata parsing library)
-            let song = read_song_metadata(&path, song.uuid).unwrap_or_else(|| {
-                println!("Failed to read metadata for file {:?}: Using metadata stored in library", path);
-                song
-            });
+            let song = match read_song_metadata(&path, song.uuid) {
+                Some(new_song) => {
+                    if song != new_song {
+                        self.dirty = true;
+                    }
+                    new_song
+                }
+                None => {
+                    println!("Failed to read metadata for file {:?}: Using metadata stored in library", path);
+                    song
+                }
+            };
             self.songs.insert(song.uuid, song);
         }
-        self.dirty = true;
         Ok(())
     }
 
